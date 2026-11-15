@@ -1,0 +1,59 @@
+{
+  "name": "durable-chat",
+  "version": "1.0.0",
+  "description": "Terminal coordinator for durable pi agents with a TUI dashboard, background jobs, and configurable local inference",
+  "main": "dist/cli.js",
+  "scripts": {
+    "start": "node dist/cli.js",
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
+    "test:package": "npm run build && node --test test/package-install.test.mjs",
+    "dev": "node src/cli.ts"
+  },
+  "keywords": [
+    "cli",
+    "agents",
+    "terminal",
+    "durable",
+    "tui"
+  ],
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/chord": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-codemode": "1.5.0",
+    "@earendil-works/pi-durable": "1.5.0",
+    "@earendil-works/pi-mcp": "1.5.0",
+    "@earendil-works/pi-schema": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2"
+  },
+  "bin": {
+    "dchat": "./dist/cli.js",
+    "durable-chat": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thorinside/durable-chat.git"
+  },
+  "homepage": "https://github.com/thorinside/durable-chat#readme",
+  "bugs": {
+    "url": "https://github.com/thorinside/durable-chat/issues"
+  },
+  "files": [
+    "dist/",
+    "LICENSE",
+    "LICENSES/",
+    "THIRD_PARTY_NOTICES.md"
+  ]
+}

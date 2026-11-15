@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Local durable stores and runtime artifacts
+.durable-chat/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.lock
+*.log
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+.pi/
+auth.json
+*.pem
+*.key
+
+# Build, test and scratch output
+dist/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+tmp/
+scratch/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Release archives (built and reviewed separately)
+*.tgz
