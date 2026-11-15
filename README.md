@@ -16,16 +16,19 @@ Release process: [docs/RELEASING.md](docs/RELEASING.md).
 
 Requires Node >= 22.19 (developed on Node 26).
 
-Install the reviewed package from the [GitHub release](https://github.com/thorinside/durable-chat/releases):
+Install from [npm](https://www.npmjs.com/package/durable-chat):
 
 ```sh
-npm install --global https://github.com/thorinside/durable-chat/releases/download/v1.0.0/durable-chat-1.0.0.tgz
+npm install -g durable-chat
 dchat help
 dchat --provider faux --no-mcp ask "hello"  # offline; no model account required
 ```
 
-The intended npm name is `durable-chat`; registry publication is separate from GitHub releases.
-Until it is published, use the release archive above rather than assuming `npm install -g durable-chat` works.
+Alternatively, install the reviewed archive from the [GitHub release](https://github.com/thorinside/durable-chat/releases):
+
+```sh
+npm install --global https://github.com/thorinside/durable-chat/releases/download/v1.0.0/durable-chat-1.0.0.tgz
+```
 
 For a source checkout:
 

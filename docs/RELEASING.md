@@ -67,8 +67,13 @@ release is not an npm registry publication.
 
 ## npm registry publication
 
-The intended package name is durable-chat. An unauthenticated registry 404 does
-not establish ownership or reserve the name. Before publishing:
+[durable-chat@1.0.0](https://www.npmjs.com/package/durable-chat/v/1.0.0) is published
+on npm under the `thorinside` maintainer account. Registry installation, both CLI
+aliases and offline background-job persistence have been verified against the
+reviewed release archive. Keep this immutable version and its Git tag unchanged.
+
+Before publishing a subsequent version, verify account ownership again. An
+unauthenticated registry 404 does not establish ownership or reserve a name:
 
 ```sh
 npm whoami --registry=https://registry.npmjs.org
