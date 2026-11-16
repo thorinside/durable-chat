@@ -324,6 +324,7 @@ Folders outside home remain absolute. Allow program-controlled titles in your te
 | `Alt-S` | steer vs follow-up for the current target (main or job) |
 | `Ctrl-V` | paste an image into the composer (main only) |
 | `Enter` | send, open the selected job, or confirm |
+| `Shift-Enter` | insert a newline in the composer (`Ctrl-J` or `Alt-Enter` fallback) |
 | `j/k`, `g/G`, `PgUp/PgDn` | move selection or scroll |
 | Mouse wheel / trackpad | scroll the pane under the pointer without moving keyboard focus |
 | Cmd-click / Ctrl-click | open transcript links using the terminal's link modifier |
@@ -349,7 +350,13 @@ Transcript prose supports lightweight Markdown: headings, emphasis, lists, links
 blocks, including streaming replies. Tool output stays literal; code blocks use plain styling without
 syntax highlighting. The plain-chat interface is unchanged.
 
-The composer has a dark-grey three-row background with blank padding above and below the input.
+The multiline composer grows from a dark-grey three-row background and scrolls longer drafts while
+keeping the cursor visible. **Shift-Enter inserts a line break; plain Enter sends.** If your terminal
+does not distinguish Shift-Enter from Enter, use **Ctrl-J** (or Alt-Enter) to insert a newline instead.
+Arrow keys navigate the draft; Backspace/Delete can join lines. Bracketed text pastes keep actual
+line breaks (CRLF and CR normalize to LF) without sending. Large pastes appear as folded paste
+markers; their complete text, not the marker, is sent. Visual wrapping adds no newline characters,
+and text copied without line breaks cannot have its original layout reconstructed.
 Pane headings, the target/status line, and individual jobs have spacer rows; the transcript has a solid
 black background. While targeting `main`, newly arriving jobs are highlighted automatically. Returning
 to `main` selects the newest visible job; manual browsing between arrivals and pinned job targets are
