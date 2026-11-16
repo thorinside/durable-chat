@@ -368,6 +368,58 @@ test("copy excludes speaker gutters and right cell fill while preserving code in
 	assert.equal(app.copied.length, count, "selecting only decorative gutter cells copies nothing");
 });
 
+// Ordinary fenced-code tests have no nested rails or soft wraps; those display rows
+// cannot establish where source code begins or whether a newline belongs in a command.
+test("nested code rails and fences are excluded without stripping literal rails, indentation or blank code rows", async (t) => {
+	const source = 'if (ok) {\n  if (next) {\n    run("│", "界é🙂");  \n  \n\n  }\n}';
+	const content = ["```ts", ...source.split("\n"), "```"].map((line) => `> > ${line}`).join("\n");
+	const app = await fixture(t, 0, content);
+	const frame = app.frame();
+	const { x, width } = transcriptBounds(app);
+	const first = frame.findIndex((line) => line.includes("```ts"));
+	const last = frame.findLastIndex((line) => line.includes("```"));
+	assert.ok(first >= 4 && last > first, "the entire synthetic code block is visible");
+	assert.ok(app.rawFrame().every((line) => !line.includes("dchat-internal-code:")), "semantic annotations must never reach terminal output");
+	pointer(app, "press", x, first);
+	pointer(app, "drag", x + width - 1, last);
+	pointer(app, "release", x + width - 1, last);
+	assert.deepEqual(app.copied, [source]);
+});
+
+test("code selection rejoins soft-wrapped commands with source spaces but retains real code newlines after resizing", async (t) => {
+	const command = '  curl --header "界é🙂" --data "one  two" https://example.test/a/long/path --flag --last END';
+	const source = `${command}\n  next();`;
+	const app = await fixture(t, 0, `\`\`\`sh\n${source}\n\`\`\``);
+	for (const columns of [52, 100, 140]) {
+		const frame = app.resize(columns);
+		const { x, width } = transcriptBounds(app);
+		const first = frame.findIndex((line) => line.includes("curl"));
+		const commandEnd = frame.findIndex((line) => line.includes("END"));
+		const last = frame.findIndex((line) => line.includes("next();"));
+		assert.ok(first >= 4 && commandEnd > first && last > commandEnd, "the command wraps and the real next line is visible");
+		pointer(app, "press", x, first);
+		pointer(app, "drag", x + width - 1, last);
+		pointer(app, "release", x + width - 1, last);
+		assert.equal(app.copied.at(-1), source);
+		await Promise.resolve();
+	}
+});
+
+test("reverse partial selection across code wraps copies whole Unicode graphemes and only the selected source range", async (t) => {
+	const command = '  run(界é🙂); --data "one  two" https://example.test/a/long/path --flag END trailing';
+	const app = await fixture(t, 0, `\`\`\`\n${command}\n\`\`\``);
+	const frame = app.resize(52);
+	const first = frame.findIndex((line) => line.includes("界"));
+	const last = frame.findIndex((line) => line.includes("END"));
+	assert.ok(first >= 4 && last > first);
+	const start = visibleWidth(frame[first]!.slice(0, frame[first]!.indexOf("界"))) + 1;
+	const end = visibleWidth(frame[last]!.slice(0, frame[last]!.indexOf("END")));
+	pointer(app, "press", end, last); // Include E, not ND or the remainder of the row.
+	pointer(app, "drag", start, first); // Inside the second cell of 界.
+	pointer(app, "release", start, first);
+	assert.deepEqual(app.copied, [command.slice(command.indexOf("界"), command.indexOf("END") + 1)]);
+});
+
 test("partial-line copy preserves deliberately selected internal spaces at the selection edge", async (t) => {
 	const app = await fixture(t, 0, "```\n  run(界é🙂);  next();\n```");
 	const frame = app.frame();

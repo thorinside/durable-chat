@@ -1,9 +1,10 @@
 import { homedir } from "node:os";
 import { isAbsolute, relative, sep } from "node:path";
-import { backgroundAnsi, indexedColor, Markdown, styleText, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { backgroundAnsi, indexedColor, styleText, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { MarkdownTheme, TextAttributes } from "@earendil-works/pi-tui";
 import type { EntryRecord, UsageState } from "@earendil-works/pi-durable";
 import { formatDuration } from "../format.ts";
+import { renderCopyableMarkdown, type CodeCopySpan } from "./markdown-copy.ts";
 
 /** Display paths beneath home with `~`, keeping sibling directories and other roots absolute. */
 export function shortenHome(path: string, home = homedir()): string {
@@ -110,7 +111,7 @@ const TRANSCRIPT_MARKDOWN_THEME: MarkdownTheme = {
 };
 
 /** Copy bounds are terminal columns, recorded before pane padding is added. */
-export type TranscriptLine = { text: string; copyStart: number; copyEnd: number };
+export type TranscriptLine = { text: string; copyStart: number; copyEnd: number; code?: CodeCopySpan; copySkip?: boolean };
 
 export function transcriptLine(text: string, copyStart = 0): TranscriptLine {
 	return { text, copyStart, copyEnd: visibleWidth(stripTerminalSequences(text).replace(/ +$/u, "")) };
@@ -118,13 +119,22 @@ export function transcriptLine(text: string, copyStart = 0): TranscriptLine {
 
 function prefixLines(text: string, prefix: string, width: number, color: number): TranscriptLine[] {
 	const inner = Math.max(1, width - visibleWidth(prefix));
-	const markdown = new Markdown(text, 0, 0, TRANSCRIPT_MARKDOWN_THEME, { color: (value) => fg(value, color) }, { renderLatex: false });
-	const rendered = markdown.render(inner);
-	const lines = rendered.length === 0 ? [""] : rendered;
-	const pad = " ".repeat(visibleWidth(prefix));
-	return lines.map((line, index) => transcriptLine(fg(index === 0 ? prefix : pad, color) + line,
-		// Keep visible speaker labels, but not the blank continuation gutter.
-		index === 0 && prefix.trim() !== "" ? prefix.length - prefix.trimStart().length : visibleWidth(prefix)));
+	const rendered = renderCopyableMarkdown(text, inner, TRANSCRIPT_MARKDOWN_THEME, { color: (value) => fg(value, color) });
+	const lines = rendered.length === 0 ? [{ text: "" }] : rendered;
+	const gutter = visibleWidth(prefix);
+	const pad = " ".repeat(gutter);
+	return lines.map((line, index) => {
+		const row = transcriptLine(fg(index === 0 ? prefix : pad, color) + line.text,
+			// Keep visible speaker labels, but not the blank continuation gutter.
+			index === 0 && prefix.trim() !== "" ? prefix.length - prefix.trimStart().length : gutter);
+		if (line.copyStart !== undefined && line.copyEnd !== undefined) {
+			row.code = line.code;
+			row.copyStart = gutter + line.copyStart;
+			row.copyEnd = gutter + line.copyEnd;
+		}
+		row.copySkip = line.copySkip;
+		return row;
+	});
 }
 
 function rule(label: string, width: number): string {
