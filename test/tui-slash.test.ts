@@ -97,6 +97,9 @@ test("slash reset preserves confirmation and invalid commands fail locally witho
 	for (const [input, error] of invalid) {
 		await command(input);
 		assert.match(render(), error);
+		if (input.startsWith("/send")) assert.ok(render().includes(input), "failed job input remains editable");
+		await dashboard.handleInput("\x01");
+		await dashboard.handleInput("\x0b");
 	}
 	const history = await runtime.root.entries({ order: "ascending" }, 100, undefined, runtime.context);
 	assert.equal(history.items.filter((entry) => entry.kind === "pi.user" || entry.kind === "pi.reset").length, 0);

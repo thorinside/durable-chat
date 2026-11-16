@@ -65,8 +65,9 @@ inspector overlay; below 80 columns the top strip becomes `Main | Jobs` tabs wit
 
 Two groups: **Live** (pending, running, waiting, sleeping, completing) and **Finished** (completed,
 failed, aborted). Each row shows id, status, age, and a truncated brief. Blocked jobs show their reason
-and a warning color. Selecting with `j/k` updates the transcript and context panes immediately; `Enter`
-pins the selection and focuses the transcript.
+and a warning color. Selecting with ↑/↓ or `j/k` previews the transcript and context panes immediately;
+`Enter` pins the selection and focuses the composer immediately. A pending transcript load cannot steal
+focus when it completes. Tab/Shift-Tab still reach transcript scrolling.
 
 The list is fed by one `watchTaskGraph`; the brief and receipt come from `scanJobs`/`getTask` and are
 refreshed only when a graph node appears, changes status, or disappears. No polling.
@@ -98,7 +99,9 @@ One editor with a visible target: `to main ›` or `to job #13 ›`.
 
 - `Enter` sends; `Shift-Enter` inserts a newline (`Ctrl-J` or `Alt-Enter` fallback); `Ctrl-T` toggles the target.
 - For the current target, a `(steer)` badge shows the selected ingress; `Alt-S` toggles it for main or a job.
-  Default `followUp`, because it is the safe choice while the coordinator is answering.
+  Main defaults to `followUp`; live jobs default to `steer`, completed conversations to `followUp`.
+  Explicit job choices are remembered per job, independently of Main. The durable job status is checked
+  at admission; steering races/idle jobs reject without clearing the draft.
 - In job-brief mode (`n`), the target reads `new job ›`; `Enter` admits the job and pins it.
 - While an action is in flight, the composer remains usable for main; the status line shows the action.
 
@@ -109,8 +112,8 @@ Actions apply to the **selected target**, named in every confirmation.
 | Key | Action |
 | --- | --- |
 | `Tab` / `Shift-Tab` | Cycle focus: composer → jobs → transcript |
-| `j/k`, `g/G`, `PgUp/PgDn` | Move/scroll |
-| `Enter` | Send, open the selected job, or confirm |
+| `↑/↓` or `j/k`, `g/G`, `PgUp/PgDn` | Move/scroll outside the composer |
+| `Enter` | Send, pin highlighted job and focus composer, or confirm |
 | `Esc` | Close overlay, stop scrolling, return target to main |
 | `n` | New job brief |
 | `Ctrl-T` | Toggle composer target main/selected job |
@@ -119,7 +122,7 @@ Actions apply to the **selected target**, named in every confirmation.
 | `R` | Reset selected target (optional handoff prompt, confirm) |
 | `c` | Cancel selected job (confirm) |
 | `a` | Abort the main run (confirm; does not cancel jobs) |
-| `s` | Send a follow-up to the selected job |
+| `s` | Compose; in jobs, pin the highlighted job first (no auto-send) |
 | `y` | Copy the selected message/answer |
 | `/` | Composer: enter a slash command; jobs/transcript: filter by id, brief, or status |
 | `f` | Show or hide finished jobs |
@@ -140,8 +143,12 @@ already the runtime's behavior.
 
 - **New job**: `createJobInCommit` in the same transaction as today; the job starts because the TUI has
   scheduling enabled; the new job is selected. No model turn is spent in main for a TUI-created job.
-- **Send to job**: `sendToJob`; the transcript streams the job conversation. `Alt-S` selects steer or
-  follow-up for either target, using native `Conversation.submit({ whenBusy })`.
+- **Message job**: default live-job steering uses the same atomic native admission and `JobLink`
+  tracking as Main’s task tool, without waiting for the worker. `whenBusy: "steer", whenIdle: "reject"`
+  admits only an active run and lands at a supported boundary, not by interrupting a tool. Explicit
+  `Alt-S` follow-up uses `whenBusy: "followUp"` and waits until the final boundary. Completed conversations
+  can still be continued with follow-up. Admission notices say queued, not delivered or completed.
+  Drafts/attachments clear only after successful admission; failed sends keep them editable.
 - **Compact**: `compactConversation`; wait through the compaction task and the placement, then show the
   summary entry id or the no-op reason. The TUI is blocked only for that action, not for input.
 - **Reset**: prompt for an optional handoff, confirm, then `reset()`. Main reset does not touch jobs.
@@ -235,8 +242,9 @@ Implemented choices:
 - Full-screen **alt-screen** dashboard; default focus is the **composer** so chat is immediate.
 - **Tab** is the action boundary: plain `n/c/m/R/s/a` work outside the composer, so typing never triggers
   an action. `Ctrl-N` opens a new-job brief from anywhere.
-- `m`/`R`/`c` act on the **pinned target**; `Enter` pins the highlighted job; `Ctrl-T` toggles main ↔ job.
-- Entering jobs focus and moving with `j/k`, arrows, or `g/G` previews the highlighted job immediately,
+- `m`/`R`/`c` act on the **pinned target**; `Enter` pins the highlighted job and focuses the composer;
+  `Ctrl-T` toggles main ↔ job.
+- Entering jobs focus and moving with ↑/↓, `j/k`, or `g/G` previews the highlighted job immediately,
   including its live watch. This does not change the composer/action target or draft. Tab to transcript
   keeps the preview for scrolling; returning to composer restores the pinned target's transcript.
   New arrivals do not steal a preview selection. Switching rows resets to the latest messages, stops

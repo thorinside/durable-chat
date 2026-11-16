@@ -1,9 +1,9 @@
 import { arr, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
-import { AgentDoc, ConversationIdle, defineExtension, defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { AgentDoc, defineExtension, defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import type { ConversationId, EntryId, Extension, ModelRef, TaskId } from "@earendil-works/pi-durable";
 import { formatJobDetail, formatJobList } from "./format.ts";
-import { createJobInCommit, jobConversationId, jobInputDraft, normalizeBrief, type JobCreateOptions } from "./jobs.ts";
-import { JobLink, JOB_KIND, type JobState } from "./tasks.ts";
+import { createJobInCommit, queueJobSteering, normalizeBrief, type JobCreateOptions } from "./jobs.ts";
+import { JobLink, JOB_KIND } from "./tasks.ts";
 import { selectForkSource } from "./forks.ts";
 import { planWorkspace } from "./workspaces.ts";
 import { JobTags, normalizeTags, resolveTaggedSource, setJobTags, taggedJob } from "./tags.ts";
@@ -58,28 +58,10 @@ export function createTaskExtension(options: {
 				const id = Number(args.id);
 				if (!Number.isSafeInteger(id) || id <= 0) return textReply("Provide a valid positive job id.", true);
 				try {
-					const draft = jobInputDraft(args.message ?? "", true);
-					const job = await api.getTask(id as TaskId, context);
-					if (job === undefined || job.kind !== JOB_KIND) return textReply(`No job #${id}.`, true);
-					if (job.state.status === "terminal") return textReply(`Job #${id} is no longer running. Start or fork a job for new work.`, true);
-					const conversationId = await jobConversationId(api, id, context);
-					const conversation = conversationId === undefined ? undefined : await api.conversation(conversationId as ConversationId, context);
-					if (conversation === undefined) return textReply(`Job #${id} has no conversation.`, true);
-					const requestId = `job:${id}:steer:${api.taskId}`;
-					await api.commit(async (tx) => {
-						const current = await tx.task(id as TaskId);
-						if (current === undefined || current.kind !== JOB_KIND || current.state.status === "terminal"
-							|| (current.state.checkpoint as JobState).phase !== "run") throw new Error(`Job #${id} is no longer running.`);
-						const link = await tx.doc(JobLink, id as TaskId);
-						// Admission and tracking are atomic; the job cannot finish between them.
-						await conversation.submit(tx, { ...draft, requestId, whenIdle: "reject" });
-						link.steering = { requestId, message: draft.content };
-					}, context);
+					await queueJobSteering(api, id, normalizeBrief(args.message ?? ""), context, `job:${id}:steer:${api.taskId}`);
 					return textReply(`Steering queued for job #${id}. It will receive the message at its next boundary; work continues. Wait for its completion notice; do not poll.`);
 				} catch (error) {
-					return textReply(error instanceof ConversationIdle
-						? `Job #${id} has no active run to steer; it may have just finished.`
-						: error instanceof Error ? error.message : String(error), true);
+					return textReply(error instanceof Error ? error.message : String(error), true);
 				}
 			}
 			if (args.action === "tag") {

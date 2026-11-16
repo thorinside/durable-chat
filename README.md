@@ -359,13 +359,13 @@ Folders outside home remain absolute. Allow program-controlled titles in your te
 | `Ctrl-X` | toggle context pane; saved in the active config (`Alt-C` alias for literal `ESC c` input) |
 | `Alt-S` | steer vs follow-up for the current target (main or job) |
 | `Ctrl-V` | paste an image into the composer (main only) |
-| `Enter` | send, open the selected job, or confirm |
+| `Enter` | send, or pin the highlighted job and focus the composer; confirm prompts |
 | `Shift-Enter` | insert a newline in the composer (`Ctrl-J` or `Alt-Enter` fallback) |
-| `j/k`, `g/G`, `PgUp/PgDn` | move selection or scroll |
+| `↑/↓` or `j/k`, `g/G`, `PgUp/PgDn` | move selection or scroll outside the composer |
 | Mouse wheel / trackpad | scroll the pane under the pointer without moving keyboard focus |
 | Cmd-click / Ctrl-click | open transcript links using the terminal's link modifier |
 | `n / c / m / R` | new job · cancel · compact · reset (selected target) |
-| `s / t / f / y` | send-to · expand tools · show finished · copy |
+| `s / t / f / y` | compose (jobs: pin highlighted job) · expand tools · show finished · copy |
 | `/` | start a slash command in the composer; filter jobs when focus is on jobs/transcript |
 | `[` / `]` | shrink / grow the jobs pane |
 | `{` / `}` | shrink / grow the context pane when there is room (does not enable a hidden pane) |
@@ -398,11 +398,13 @@ line breaks (CRLF and CR normalize to LF) without sending. Large pastes appear a
 markers; their complete text, not the marker, is sent. Visual wrapping adds no newline characters,
 and text copied without line breaks cannot have its original layout reconstructed.
 Pane headings, the target/status line, and individual jobs have spacer rows; the transcript has a solid
-black background. Tab to jobs, then `j/k` or Up/Down to preview the highlighted job's latest transcript
+black background. Tab to jobs, then Up/Down (or `j/k`) to preview the highlighted job's latest transcript
 and live updates without pressing Enter. `g/G` preview the first/last row. Previewing never changes the
-composer or action target: **Enter pins the job** and focuses its transcript; `Ctrl-T` explicitly toggles
-the target. Tab from jobs to transcript keeps the preview for scrolling; returning to the composer
-restores the pinned target's transcript and keeps your draft. Confirmations still name the pinned target.
+composer or action target: **Enter pins the job and focuses the composer**, ready to type immediately.
+It preserves the draft and attachments without submitting them. `s` in jobs does the same; `Ctrl-T`
+explicitly toggles the target. Tab from jobs to transcript keeps the preview for scrolling; returning to
+the composer restores the pinned target's transcript and keeps your draft. `Shift-Tab` from the composer goes straight
+to transcript scrolling (`↑/↓` or `j/k`). Confirmations still name the pinned target.
 While targeting `main`, newly arriving jobs are highlighted automatically unless you are browsing a
 preview. Returning to `main` selects the newest visible job; manual browsing and pinned targets are
 preserved. A single `Ctrl-C` clears the input or stops waiting as before; a second consecutive press
@@ -418,9 +420,22 @@ Jobs run in the background and main stays usable. The TUI is the single store wr
 jobs, and the next run resumes them. `durable-chat --plain` or `durable-chat chat` is the old
 line-oriented interface over the same runtime.
 
-Steering applies to both targets: `Alt-S` selects whether the next message joins the current run
-(`steer`) or queues behind it (`followUp`). The CLI equivalent is `task send <id> "<message>" --steer`
-or `/steer <id> <message>` in the chat or TUI composer.
+**Messages to live jobs default to steering.** Tab to jobs, select with ↑/↓ (or j/k), press Enter,
+then type and Enter to submit. A `(steer)` badge identifies the mode. Admission returns immediately:
+native steering queues at the next supported boundary (for example, after the executing tool round),
+without aborting a tool or starting a concurrent turn. It cannot change a model request already in flight.
+The job stays live through its steering response, using the same durable admission/tracking as Main's
+`task` steer action; a "steering queued" notice is not a delivery or completion claim.
+
+`Alt-S` explicitly chooses follow-up instead: it waits until the current run ends, preserving queued
+message order. This choice is remembered per job, independently of Main (which still defaults to
+follow-up). Completed job conversations default to follow-up/continuation; explicit steering of an idle,
+finished, or finishing job is refused and leaves the draft intact. A just-starting job without an active
+run may also refuse steering; retry once it is running. Images remain Main-only and are retained if a
+job send is refused. Failed admissions retain text for correction/retry.
+
+`/send <id> <message>` explicitly queues follow-up; `/steer <id> <message>` explicitly requests
+steering without changing the pinned target. The CLI equivalent is `task send <id> "<message>" --steer`.
 
 Starting a job from the TUI or `task add` writes a native, model-visible `[host]` start notice into
 main's conversation. Every job reports completion, failure, or abort as a native follow-up input by

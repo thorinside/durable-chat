@@ -19,6 +19,7 @@ import {
 	jobCreateOptionsOf,
 	jobRecord,
 	jobInputDraft,
+	queueJobSteering,
 	normalizeBrief,
 	scanJobs,
 } from "../jobs.ts";
@@ -111,6 +112,8 @@ export class Dashboard implements Component {
 		toolsExpanded: false,
 		steer: false,
 	};
+	/** Explicit job modes override the status-aware default, independently of Main. */
+	private readonly jobInputModes = new Map<number, boolean>();
 	private readonly main: Transcript;
 	private current: Transcript | undefined;
 	private graph: TaskGraphWatch | undefined;
@@ -380,14 +383,20 @@ export class Dashboard implements Component {
 		return this.displayLoad;
 	}
 
+	private steerInput(target = this.state.target): boolean {
+		if (target.kind === "main") return this.state.steer;
+		return this.jobInputModes.get(target.id) ?? (this.nodes.has(target.id) || this.records.get(target.id)?.state.status === "running");
+	}
+
 	private async openSelected(): Promise<void> {
 		const id = this.state.selectedJobId;
 		if (id === undefined) return;
 		try {
-			if (await this.pinJob(id) && this.state.focus === "jobs" && this.state.selectedJobId === id && this.state.target.kind === "job" && this.state.target.id === id) {
-				this.setFocus("transcript");
-				this.renderSoon();
-			}
+			const loaded = this.pinJob(id);
+			// Activation is immediate, even during a slow preview read. Its completion must not steal focus.
+			this.setFocus("composer");
+			this.renderSoon();
+			await loaded;
 		} catch (error) {
 			this.flash(message(error), "error");
 		}
@@ -614,7 +623,8 @@ export class Dashboard implements Component {
 		}
 		if (text.length === 0 && this.attachments.length === 0) return;
 		if (text.startsWith("/")) {
-			this.input.setValue("");
+			// Addressed job input retains its draft until admission succeeds.
+			if (!/^\/(?:send|steer)(?:\s|$)/i.test(text)) this.input.setValue("");
 			try {
 				await this.submitSlash(text);
 			} catch (error) {
@@ -628,12 +638,16 @@ export class Dashboard implements Component {
 			this.flash("images go to main only", "error");
 			return;
 		}
-		const attachments = this.attachments;
-		this.attachments = [];
-		this.input.setValue("");
-		this.scroll = 0;
-		this.renderSoon();
-		await this.runAction(`sending to ${targetLabel(target)}`, async (context) => {
+		const attachments = [...this.attachments];
+		let steer = this.steerInput(target);
+		const explicitJobMode = target.kind === "job" ? this.jobInputModes.get(target.id) : undefined;
+		const admitted = () => {
+			// Admission may finish after the user has begun editing the next draft.
+			if (this.input.getValue() === value) this.input.setValue("");
+			this.attachments = this.attachments.filter((image) => !attachments.includes(image));
+			this.scroll = 0;
+		};
+		await this.runAction(`${steer ? "steering" : "queuing to"} ${targetLabel(target)}`, async (context) => {
 			if (target.kind === "main") {
 				const content: UserInput = attachments.length === 0
 					? value
@@ -641,16 +655,28 @@ export class Dashboard implements Component {
 				await this.runtime.root.submit({
 					type: "input",
 					content,
-					whenBusy: this.state.steer ? "steer" : "followUp",
+					whenBusy: steer ? "steer" : "followUp",
 				}, context);
-				this.flash(this.state.steer ? "steered main" : "sent to main");
+				admitted();
+				this.flash(steer ? "steered main" : "sent to main");
 				return;
 			}
-			const conversation = await findJobConversation(this.runtime.harness, target.id, context);
-			if (conversation === undefined) throw new Error(`job #${target.id} has no conversation`);
-			// Validate job input as before, but retain the composed whitespace verbatim.
-			await conversation.submit({ ...jobInputDraft(value, this.state.steer), content: value }, context);
-			this.flash(this.state.steer ? `steered job #${target.id}` : `sent to job #${target.id}`);
+			if (explicitJobMode === undefined) {
+				// Graph/list refresh is debounced; use the durable status for the automatic ingress default.
+				const job = await this.runtime.harness.getTask(target.id as TaskId, context);
+				if (job === undefined || job.kind !== JOB_KIND) throw new Error(`No job #${target.id}.`);
+				steer = job.state.status !== "terminal";
+			}
+			if (steer) {
+				await queueJobSteering(this.runtime.harness, target.id, value, context);
+			} else {
+				const conversation = await findJobConversation(this.runtime.harness, target.id, context);
+				if (conversation === undefined) throw new Error(`job #${target.id} has no conversation`);
+				// Explicit follow-up also continues completed conversations; it does not steer a live run.
+				await conversation.submit({ ...jobInputDraft(value, false), content: value }, context);
+			}
+			admitted();
+			this.flash(steer ? `steering queued for job #${target.id}; delivery at next boundary` : `follow-up queued for job #${target.id}`);
 		});
 	}
 
@@ -778,10 +804,15 @@ export class Dashboard implements Component {
 				const content = tail.slice(rawId!.length).trim();
 				if (content.length === 0) throw new Error(`Usage: /${command} <id> <message>`);
 				await this.runAction(`${command} job #${id}`, async (context) => {
-					const conversation = await findJobConversation(this.runtime.harness, id, context);
-					if (conversation === undefined) throw new Error(`No conversation for job #${id}.`);
-					await conversation.submit(jobInputDraft(content, command === "steer"), context);
-					this.flash(command === "steer" ? `steered job #${id}` : `sent to job #${id}`);
+					if (command === "steer") {
+						await queueJobSteering(this.runtime.harness, id, content, context);
+					} else {
+						const conversation = await findJobConversation(this.runtime.harness, id, context);
+						if (conversation === undefined) throw new Error(`No conversation for job #${id}.`);
+						await conversation.submit(jobInputDraft(content, false), context);
+					}
+					if (this.input.getValue().trim() === text) this.input.setValue("");
+					this.flash(command === "steer" ? `steering queued for job #${id}; delivery at next boundary` : `follow-up queued for job #${id}`);
 				});
 				return;
 			}
@@ -1265,7 +1296,7 @@ export class Dashboard implements Component {
 			case "confirmAbortMain":
 				return "— › ";
 			default: {
-				const steer = this.state.steer ? " (steer)" : "";
+				const steer = this.steerInput() ? " (steer)" : "";
 				return `to ${targetLabel(this.state.target)}${steer} › `;
 			}
 		}
@@ -1299,9 +1330,9 @@ export class Dashboard implements Component {
 		else if (this.state.mode === "confirmReboot") hint = [shortcut("Y", "reboot"), shortcut("ENTER / N / ESC", "cancel")].join(separator);
 		else if (this.state.mode === "confirmCancel" || this.state.mode === "confirmReset" || this.state.mode === "confirmQuit" || this.state.mode === "confirmAbortMain") hint = [shortcut("Y / ENTER", "confirm"), shortcut("N / ESC", "cancel")].join(separator);
 		else if (this.actionLabel !== undefined) hint = shortcut("CTRL-C", "stop waiting (work stays durable)");
-		else if (this.state.focus === "composer") hint = [shortcut("ENTER", "send"), shortcut(this.input.getValue().length === 0 ? "?" : "TAB ?", "help"), shortcut("TAB", "focus"), shortcut("SHIFT-ENTER", "newline"), ...(this.attachments.length === 0 ? [] : [fg(`${this.attachments.length} attached`, YELLOW)])].join(separator);
-		else if (this.state.focus === "jobs") hint = [shortcut("ENTER", "open"), shortcut("?", "help"), shortcut("J/K", "select"), shortcut("TAB", "focus")].join(separator);
-		else hint = [shortcut("J/K", "scroll"), shortcut("?", "help"), shortcut("S", "compose"), shortcut("TAB", "focus")].join(separator);
+		else if (this.state.focus === "composer") hint = [shortcut("ENTER", this.state.target.kind === "main" ? "send" : this.steerInput() ? "steer" : "queue"), ...(this.state.target.kind === "job" ? [shortcut("ALT-S", this.steerInput() ? "queue instead" : "steer instead")] : []), shortcut(this.input.getValue().length === 0 ? "?" : "TAB ?", "help"), shortcut("TAB", "focus"), shortcut("SHIFT-ENTER", "newline"), ...(this.attachments.length === 0 ? [] : [fg(`${this.attachments.length} attached`, YELLOW)])].join(separator);
+		else if (this.state.focus === "jobs") hint = [shortcut("ENTER", "message"), shortcut("↑/↓ J/K", "preview"), shortcut("?", "help"), shortcut("TAB", "focus")].join(separator);
+		else hint = [shortcut("↑/↓ J/K", "scroll"), shortcut("?", "help"), shortcut("S", "compose"), shortcut("TAB", "focus")].join(separator);
 		if (this.scroll > 0 && this.state.focus === "transcript") hint += dim(` · ↑${this.scroll}`);
 		return truncateToWidth(` ${hint}`, width, "", true);
 	}
@@ -1315,15 +1346,16 @@ export class Dashboard implements Component {
 			["SHIFT-ENTER", "insert a newline (Ctrl-J or Alt-Enter fallback); Enter sends"],
 			["ALT-S", "steer vs follow-up for the target"],
 			["CTRL-V", "paste an image into the composer (main only)"],
-			["ENTER", "send, open job, or confirm prompt"],
+			["ENTER", "send input, or pin job and focus composer; confirm prompt"],
+			["S (JOBS)", "pin highlighted job and compose; running jobs default to steer"],
 			["[ / ]", "resize the jobs pane"],
 			["{ / }", "resize the context pane"],
 			["0", "reset pane widths"],
-			["J / K", "move job selection or scroll"],
+			["↑ / ↓ or J / K", "move job selection or scroll (not while typing)"],
 			["WHEEL", "scroll the pane under the pointer"],
 			["G / SHIFT-G", "jump to oldest / newest"],
 			["N / C / M / SHIFT-R", "new · cancel · compact · reset"],
-			["S / T / I / F / Y", "send-to · tools · inspector · finished · copy"],
+			["S / T / I / F / Y", "compose · tools · inspector · finished · copy"],
 			["/", "filter jobs outside composer; commands inside"],
 			["CTRL-C", "stop waiting / clear prompt / close overlay"],
 			["CTRL-C ×2", "quit within 1.5s (confirms with live work)"],
@@ -1521,10 +1553,12 @@ export class Dashboard implements Component {
 			return;
 		}
 		if (matchesKey(data, "alt+s")) {
-			this.state.steer = !this.state.steer;
-			this.flash(this.state.steer
-				? `${targetLabel(this.state.target)} input will steer the current run`
-				: `${targetLabel(this.state.target)} input will queue as a follow-up`);
+			const steer = !this.steerInput();
+			if (this.state.target.kind === "main") this.state.steer = steer;
+			else this.jobInputModes.set(this.state.target.id, steer);
+			this.flash(steer
+				? `${targetLabel(this.state.target)} input will steer at the next boundary`
+				: `${targetLabel(this.state.target)} input will queue after the current run`);
 			return;
 		}
 		if (this.state.focus === "composer") {
@@ -1573,6 +1607,7 @@ export class Dashboard implements Component {
 		}
 		if (this.state.focus === "jobs") {
 			this.jobsScroll = undefined;
+			if (data === "s") { void this.openSelected(); return; }
 			if (matchesKey(data, "down") || data === "j") {
 				this.state.selectedJobId = moveSelection(this.visible, this.state.selectedJobId, 1);
 				this.previewSelected();

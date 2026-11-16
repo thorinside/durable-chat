@@ -8,6 +8,7 @@ import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { openRuntime } from "../src/harness.ts";
 import type { ImageAttachment, ImagePaster } from "../src/images.ts";
 import { Dashboard } from "../src/tui/app.ts";
+import { createJobInCommit, findJobConversation, jobOptionsOf } from "../src/jobs.ts";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
@@ -67,4 +68,29 @@ test("paste is refused for a job target, because attachments go to main only", a
 	await type("\t"); // focus the composer
 	await type("\x16");
 	assert.match(render(), /images go to main only/);
+});
+
+test("Enter job activation preserves Main-only attachments and the draft through a refused job send and return to Main", async (t) => {
+	const { runtime, dashboard, render, type } = await setup(t);
+	const started = await runtime.root.commit((tx) => createJobInCommit(tx, "attachment-target", runtime.model, runtime.jobExtensions, runtime.cwd, jobOptionsOf(runtime.config)), runtime.context);
+	await runtime.harness.abortTask(started.taskId, runtime.context);
+	await runtime.harness.waitForTask(started.taskId, runtime.context);
+	await dashboard.start();
+	await type("\x16");
+	await type("keep this image draft");
+	await type("\t");
+	await type("\r");
+	await type("!"); // Immediate typing after activation must remain composer input.
+	assert.match(render(), /to job #\d+ › keep this image draft!/);
+	await type("\r");
+	assert.match(render(), /images go to main only/);
+	assert.match(render(), /keep this image draft/);
+	const worker = (await findJobConversation(runtime.harness, Number(started.taskId), runtime.context))!;
+	assert.equal((await worker.entries({ order: "ascending" }, 100, undefined, runtime.context)).items.filter((entry) => entry.kind === "pi.user").length, 0);
+	await type("\x14");
+	await type("\r");
+	const entries = await runtime.root.entries({ order: "ascending" }, 100, undefined, runtime.context);
+	const input = entries.items.findLast((entry) => entry.kind === "pi.user")!;
+	assert.match(JSON.stringify(input.model), /keep this image draft/);
+	assert.match(JSON.stringify(input.model), /"type":"image"/);
 });
