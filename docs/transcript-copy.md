@@ -55,10 +55,15 @@ padded/background-painted display rows. Serialization intersects selected cells 
 
 Code identity comes from the toolkit's `codeBlock` / `codeBlockBorder` theme callbacks, not a regex
 that strips rail characters. Temporary internal OSC 8 annotations let the toolkit carry that identity
-through its own wrapping (including quote/list nesting). The annotations are consumed immediately
-into per-row source offsets and bounds, before rendering, hyperlink hit testing or copy. They are
-never emitted to the terminal. Source ranges that cannot be matched fall back to rendered-row copy
-with code-only bounds, rather than guessing.
+through its own wrapping (including quote/list nesting). A fresh per-render UUID namespace, checked
+against the input, separates annotations from user-authored URLs. Actual OSC 8 events inside code
+travel as opaque APC markers while wrapping: user hyperlink closes cannot close annotations, and
+user hyperlinks cannot overwrite the toolkit's annotation state. Decoding restores their original
+replacement (not stacked) lifecycle, closing/reopening active links at physical code-row bounds so
+links do not extend onto rails or padding. Both transports are consumed immediately into per-row
+source offsets and bounds, before rendering, hyperlink hit testing or copy; private markers are never
+emitted to the terminal. Source ranges that cannot be matched fall back to rendered-row copy with
+code-only bounds, rather than guessing.
 
 This is **not byte-exact Markdown/source export**: the toolkit normalizes tabs to three spaces,
 normalizes Markdown container indentation and line endings, and does not expose the original final
