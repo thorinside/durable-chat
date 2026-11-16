@@ -451,7 +451,7 @@ jobMaxTurns: 120
 autoContinue: true
 # QuickJS scripts that call the conversation's tools; only the script's output comes back.
 codemode: true
-# Alt-C toggles this in the dashboard; enabled context still hides when space is limited.
+# Ctrl-X toggles this in the dashboard; enabled context still hides when space is limited.
 contextPanel: true
 # More than one provider can be configured. The provider key selects the active entry by name, and
 # each entry inherits the values above for keys it does not set. Entry names are provider ids.

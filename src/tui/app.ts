@@ -1299,9 +1299,9 @@ export class Dashboard implements Component {
 		else if (this.state.mode === "confirmReboot") hint = [shortcut("Y", "reboot"), shortcut("ENTER / N / ESC", "cancel")].join(separator);
 		else if (this.state.mode === "confirmCancel" || this.state.mode === "confirmReset" || this.state.mode === "confirmQuit" || this.state.mode === "confirmAbortMain") hint = [shortcut("Y / ENTER", "confirm"), shortcut("N / ESC", "cancel")].join(separator);
 		else if (this.actionLabel !== undefined) hint = shortcut("CTRL-C", "stop waiting (work stays durable)");
-		else if (this.state.focus === "composer") hint = [shortcut("ENTER", "send"), shortcut("SHIFT-ENTER", "newline"), shortcut("ALT-C", "context"), shortcut("CTRL-C ×2", "quit"), shortcut("TAB", "jobs"), shortcut("CTRL-T", "target"), shortcut("CTRL-N", "new job"), shortcut("CTRL-V", "paste image"), ...(this.attachments.length === 0 ? [] : [fg(`${this.attachments.length} attached`, YELLOW)])].join(separator);
-		else if (this.state.focus === "jobs") hint = [shortcut("J/K", "select"), shortcut("ENTER", "open"), shortcut("ALT-C", "context"), shortcut("N", "new"), shortcut("C", "cancel"), shortcut("M/SHIFT-R", "compact/reset"), shortcut("I", "info"), shortcut("TAB", "focus")].join(separator);
-		else hint = [shortcut("J/K", "scroll"), shortcut("ALT-C", "context"), shortcut("G/SHIFT-G", "oldest/newest"), shortcut("T", "tools"), shortcut("S", "send"), shortcut("C", "cancel"), shortcut("ESC", "main"), shortcut("TAB", "focus")].join(separator);
+		else if (this.state.focus === "composer") hint = [shortcut("ENTER", "send"), shortcut(this.input.getValue().length === 0 ? "?" : "TAB ?", "help"), shortcut("TAB", "focus"), shortcut("SHIFT-ENTER", "newline"), ...(this.attachments.length === 0 ? [] : [fg(`${this.attachments.length} attached`, YELLOW)])].join(separator);
+		else if (this.state.focus === "jobs") hint = [shortcut("ENTER", "open"), shortcut("?", "help"), shortcut("J/K", "select"), shortcut("TAB", "focus")].join(separator);
+		else hint = [shortcut("J/K", "scroll"), shortcut("?", "help"), shortcut("S", "compose"), shortcut("TAB", "focus")].join(separator);
 		if (this.scroll > 0 && this.state.focus === "transcript") hint += dim(` · ↑${this.scroll}`);
 		return truncateToWidth(` ${hint}`, width, "", true);
 	}
@@ -1309,7 +1309,7 @@ export class Dashboard implements Component {
 	private renderHelp(width: number, height: number): string[] {
 		const bindings: [string, string][] = [
 			["TAB / SHIFT-TAB", "cycle composer, jobs, transcript"],
-			["ALT-C", "toggle context pane (saved in active config)"],
+			["CTRL-X", "toggle context pane (saved in active config)"],
 			["CTRL-T", "target main ↔ selected job"],
 			["CTRL-N", "new job brief"],
 			["SHIFT-ENTER", "insert a newline (Ctrl-J or Alt-Enter fallback); Enter sends"],
@@ -1330,7 +1330,8 @@ export class Dashboard implements Component {
 		];
 		return this.panel("Help", [
 			bold("Slash commands (composer)"),
-			"/help · /info · /context [on|off|toggle] · /tasks · /task <id> · /log <id>",
+			"/context off · /context on · /context toggle",
+			"/help · /info · /tasks · /task <id> · /log <id>",
 			"/new [brief] · /send <id> <text> · /steer <id> <text>",
 			"/cancel <id> · /compact [focus] · /reset [handoff]",
 			"/model [id] · /provider [name] · /thinking [level] · /image <path> · /wait · /filter [query] · /rollback [path] · /reboot · /quit",
@@ -1504,7 +1505,10 @@ export class Dashboard implements Component {
 			this.renderSoon();
 			return;
 		}
-		if (matchesKey(data, "alt+c")) {
+		// Ctrl-X is unused by the editor and has an unambiguous legacy control byte.
+		// Keep only literal Meta-C as an alias: extended Alt-C matching can also
+		// match printable non-Latin keys via Kitty's base-layout key fallback.
+		if (matchesKey(data, "ctrl+x") || data === "\x1bc") {
 			this.setContextPanel();
 			return;
 		}

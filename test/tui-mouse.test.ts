@@ -496,11 +496,11 @@ test("context visibility toggling invalidates selection coordinates and copy sta
 	pointer(app, "press", x, top);
 	pointer(app, "drag", x + 8, top + 2);
 	assert.ok(highlightedRows(app).length > 0);
-	app.input("\x1bc");
+	app.input("\x18"); // Ctrl-X must invalidate stale copy coordinates too.
 	assert.doesNotMatch(app.frame()[2]!, /CONTEXT/);
 	assert.deepEqual(highlightedRows(app), []);
 	for (const enabled of [false, true]) {
-		if (enabled) app.input("\x1bc");
+		if (enabled) app.input("\x18");
 		const frame = app.frame();
 		const y = frame.findIndex((line) => line.includes("context-toggle-copy-target"));
 		x = frame[y]!.indexOf("context-toggle-copy-target");
@@ -525,7 +525,7 @@ test("context toggle under the context pointer preserves job preview selection a
 	const preview = pane(before, "TRANSCRIPT").split("\n")[0];
 	const contextX = before[2]!.indexOf("CONTEXT") + 1;
 	app.wheel(contextX, "down", 2);
-	app.input("\x1bc");
+	app.input("\x18");
 	const after = app.frame();
 	assert.doesNotMatch(after[2]!, /CONTEXT/);
 	assert.match(pane(after, "JOBS"), new RegExp(selected));

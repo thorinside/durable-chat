@@ -4,12 +4,18 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { isKittyProtocolActive, matchesKey, setKittyProtocolActive, stripTerminalSequences, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { openRuntime } from "../src/harness.ts";
 import { Dashboard } from "../src/tui/app.ts";
 
 const originalConfig = '# keep these settings\nprovider: faux\nautoContinue: false\nmcp:\n  enabled: false # no external services\n';
-const toggleKey = "\x1bc"; // Alt-C, unused by the dashboard and composer keymaps.
+const toggleKey = "\x18"; // Ctrl-X has no composer, copy, or terminal-process binding.
+const toggleEncodings = [
+	["legacy control byte", toggleKey, false],
+	["CSI-u", "\x1b[120;5u", false],
+	["Kitty press with alternate keys", "\x1b[120:88:120;5:1u", true],
+	["modifyOtherKeys", "\x1b[27;5;120~", false],
+] as const;
 
 async function fixture(t: TestContext) {
 	const dir = mkdtempSync(join(tmpdir(), "dchat-context-panel-"));
@@ -18,7 +24,8 @@ async function fixture(t: TestContext) {
 	const open = () => openRuntime({ configPath, storePath: join(dir, "store.sqlite"), withMcp: false });
 	let runtime = await open();
 	let rows = 30;
-	const create = () => new Dashboard({ runtime, rows: () => rows, requestRender() {}, onQuit() {} });
+	let quits = 0;
+	const create = () => new Dashboard({ runtime, rows: () => rows, requestRender() {}, onQuit() { quits++; } });
 	let dashboard = create();
 	t.after(async () => {
 		await dashboard.stop();
@@ -29,6 +36,7 @@ async function fixture(t: TestContext) {
 		configPath,
 		get runtime() { return runtime; },
 		get dashboard() { return dashboard; },
+		get quits() { return quits; },
 		frame(width = 160) {
 			const frame = dashboard.render(width);
 			assert.equal(frame.length, rows);
@@ -50,7 +58,7 @@ async function fixture(t: TestContext) {
 	};
 }
 
-test("Alt-C saves context off in the active config and a fresh dashboard keeps it off across resizing", async (t) => {
+test("Ctrl-X saves context off in the active config and a fresh dashboard keeps it off across resizing", async (t) => {
 	const app = await fixture(t);
 	assert.match(app.frame()[2]!, /CONTEXT/);
 	await app.key("unsent draft");
@@ -71,6 +79,105 @@ test("Alt-C saves context off in the active config and a fresh dashboard keeps i
 	assert.match(app.frame()[2]!, /CONTEXT/);
 	await app.reload();
 	assert.match(app.frame()[2]!, /CONTEXT/);
+});
+
+// The original visibility tests used only Meta-C, missing default macOS text input
+// and the different control-key encodings negotiated by ProcessTerminal.
+for (const [name, key, kitty] of toggleEncodings) {
+	test(`Ctrl-X ${name} toggles from every focus without editing or submitting the draft and persists on reload`, async (t) => {
+		const previousKitty = isKittyProtocolActive();
+		setKittyProtocolActive(kitty);
+		t.after(() => setKittyProtocolActive(previousKitty));
+		const app = await fixture(t);
+		await app.key("draft");
+		for (let focus = 0; focus < 3; focus++) {
+			await app.key(key);
+			assert.equal(app.runtime.config.contextPanel, false);
+			assert.doesNotMatch(app.frame()[2]!, /CONTEXT/);
+			assert.match(readFileSync(app.configPath, "utf8"), /contextPanel: false/);
+			await app.key(key);
+			assert.equal(app.runtime.config.contextPanel, true);
+			assert.match(app.frame().join("\n"), /to main › draft/);
+			await app.key("\t");
+		}
+		// Editor navigation still works after toggling, and Ctrl-C still clears.
+		await app.key("\x01");
+		await app.key("!");
+		assert.match(app.frame().join("\n"), /to main › !draft/);
+		await app.key("\x03");
+		assert.doesNotMatch(app.frame().join("\n"), /!draft/);
+		assert.equal(app.runtime.config.contextPanel, true);
+		assert.equal(app.quits, 0);
+		await app.key(key);
+		await app.reload();
+		assert.equal(app.runtime.config.contextPanel, false);
+		const history = await app.runtime.root.entries({ order: "ascending" }, 100, undefined, app.runtime.context);
+		assert.equal(history.items.filter((entry) => entry.kind === "pi.user").length, 0);
+	});
+}
+
+for (const [name, text] of [["default Option-C", "ç"], ["CSI-u printable ç", "\x1b[231u"]]) {
+	test(`${name} remains ordinary composer text and never changes the context preference`, async (t) => {
+		const app = await fixture(t);
+		await app.key("fa");
+		await app.key(text!);
+		await app.key("ade");
+		assert.match(app.frame().join("\n"), /to main › façade/);
+		assert.equal(app.runtime.config.contextPanel, true);
+		assert.equal(readFileSync(app.configPath, "utf8"), originalConfig);
+	});
+}
+
+test("the literal Meta-C alias still toggles without treating a Kitty printable base-layout c as a shortcut", async (t) => {
+	const app = await fixture(t);
+	await app.key("\x1bc");
+	assert.equal(app.runtime.config.contextPanel, false);
+	await app.key("\x1b[231::99;3u");
+	assert.equal(app.runtime.config.contextPanel, false);
+});
+
+test("Ctrl-X encodings do not overlap toolkit editing or copy defaults or terminal process controls", () => {
+	const reserved = ["ctrl+c", "ctrl+d", "ctrl+j", "ctrl+q", "ctrl+s", "ctrl+t", "ctrl+v", "ctrl+z", "ctrl+shift+x", "super+x", "super+c"] as const;
+	for (const [name, key] of toggleEncodings) {
+		for (const definition of Object.values(TUI_KEYBINDINGS)) {
+			const bindings = typeof definition.defaultKeys === "string" ? [definition.defaultKeys] : definition.defaultKeys;
+			for (const binding of bindings) assert.equal(matchesKey(key, binding), false, `${name} must not shadow ${binding}`);
+		}
+		for (const binding of reserved) assert.equal(matchesKey(key, binding), false, `${name} must not shadow ${binding}`);
+	}
+});
+
+test("full help stays reachable from every available focus without consuming question marks in a draft", async (t) => {
+	for (const width of [40, 160]) {
+		await t.test(`help access preserves a draft at ${width} columns`, async (t) => {
+			const app = await fixture(t);
+			const frame = () => app.frame(width).join("\n");
+			assert.match(app.frame(width).at(-1)!, /help/);
+			await app.key("?");
+			assert.match(frame(), /Help/);
+			assert.match(frame(), /CTRL-X/);
+			assert.match(frame(), /\/context off/);
+			await app.key("\x1b");
+			await app.key("draft");
+			await app.key("?");
+			assert.match(frame(), /to main › draft\?/);
+			assert.match(app.frame(width).at(-1)!, /help/);
+			// Narrow dashboards omit jobs from the focus cycle.
+			for (let focus = 0; focus < (width < 64 ? 1 : 2); focus++) {
+				await app.key("\t");
+				assert.match(app.frame(width).at(-1)!, /help/);
+				await app.key("?");
+				assert.match(frame(), /Help/);
+				await app.key("\x1b");
+				assert.match(frame(), /to main › draft\?/);
+			}
+			await app.key("\t");
+			await app.key("\x03"); // Clear only the draft before entering a command.
+			await app.command("/help");
+			assert.match(frame(), /Help/);
+			assert.match(frame(), /\/context off/);
+		});
+	}
 });
 
 test("automatic context hiding reserves usable transcript and context widths without changing preference", async (t) => {

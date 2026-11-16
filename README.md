@@ -290,9 +290,14 @@ the summary placement. A short conversation, or one with no selectable old prefi
 The default interface is a three-pane dashboard: jobs on the left, the selected conversation in the
 middle, and live context on the right. The composer sends to `main` by default; open a job to target it.
 
-**Alt-C** toggles the context pane from any dashboard focus; `/context [on|off|toggle]` does the same
-from the composer. The choice is saved as `contextPanel: true|false` using the same targeted YAML editor
-as `dchat config set contextPanel false`: it edits the active config (folder-local if present, otherwise
+**Ctrl-X** toggles the context pane from any dashboard focus; `/context [on|off|toggle]` does the same
+from the composer (for example, `/context off` hides it). Ctrl-X works with legacy control-byte,
+CSI-u/Kitty, and xterm modifyOtherKeys input without changing macOS Option-key settings. Option-C
+continues to type `ç` when the terminal sends it as text. Alt-C remains an optional alias only in
+terminals sending literal `ESC c` (Meta-C).
+
+The choice is saved as `contextPanel: true|false` using the same targeted YAML editor as
+`dchat config set contextPanel false`: it edits the active config (folder-local if present, otherwise
 `$XDG_CONFIG_HOME/durable-chat/config.yaml` or `~/.config/durable-chat/config.yaml`; `.yml` discovery is
 also supported). With `--config` or `DURABLE_CHAT_CONFIG`, only that standalone file is edited. Local
 values override global values; an explicit file stands alone. No conversation state or credential files
@@ -342,7 +347,7 @@ Folders outside home remain absolute. Allow program-controlled titles in your te
 │   #10 failed         │                               │ tokens: 18.2k         │
 ├──────────────────────┴───────────────────────────────┴──────────────────────┤
 │ to main › _                                                                  │
-│ ENTER send · CTRL-C ×2 quit · TAB jobs · CTRL-T target · CTRL-N new job     │
+│ ENTER send · ? help · TAB focus · SHIFT-ENTER newline                    │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -351,7 +356,7 @@ Folders outside home remain absolute. Allow program-controlled titles in your te
 | `Tab` / `Shift-Tab` | cycle composer → jobs → transcript |
 | `Ctrl-T` | switch composer target main ↔ selected job |
 | `Ctrl-N` | new job brief |
-| `Alt-C` | toggle context pane; saved in the active config |
+| `Ctrl-X` | toggle context pane; saved in the active config (`Alt-C` alias for literal `ESC c` input) |
 | `Alt-S` | steer vs follow-up for the current target (main or job) |
 | `Ctrl-V` | paste an image into the composer (main only) |
 | `Enter` | send, open the selected job, or confirm |
@@ -367,9 +372,13 @@ Folders outside home remain absolute. Allow program-controlled titles in your te
 | `0` | reset pane widths |
 | `i` | inspector (config, MCP notes, usage); `e` edits the config |
 | `a` | abort the main run (jobs survive) |
-| `?` | help |
+| `?` | full help outside the composer or with an empty draft; `Tab` then `?` preserves a draft |
 | `Ctrl-C` | stop waiting / clear the prompt / close an overlay; arms quitting for 1.5 seconds |
 | `Ctrl-C` twice | quit; small floating confirmation over the dashboard while live work exists |
+
+The footer shows primary actions for the focused pane and a route to full help, not the entire keymap.
+With a draft, **Tab then ?** opens help without changing the text; **/help** also opens it from the
+composer. Context visibility and less-common shortcuts are listed in full help and the table above.
 
 `Ctrl-V` attaches an image to the next message to main. It reads the native clipboard (macOS and
 Windows prebuilds, Linux with X11); `/image <path>` is the fallback where that helper is unavailable.
