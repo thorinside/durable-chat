@@ -8,6 +8,13 @@ export function isComposerNewline(data: string): boolean {
 		|| matchesKey(data, "alt+enter") || data === "\x1b\r" || data === "\x1b[13;2~";
 }
 
+/** Command/Super+Shift+Enter is one-shot follow-up, only when CSI-u reports it.
+ * xterm modifyOtherKeys has no distinct Super modifier (its bit 8 is Meta).
+ */
+export function isComposerQueue(data: string): boolean {
+	return data.endsWith("u") && matchesKey(data, "super+shift+enter");
+}
+
 /** Toolkit editing/paste/undo semantics, embedded in the dashboard's own layout. */
 export class Composer extends Editor {
 	constructor(rows: () => number, requestRender: () => void) {

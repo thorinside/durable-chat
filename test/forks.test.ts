@@ -442,7 +442,7 @@ test("main steering rejects invalid targets and idle or finished jobs without st
 
 // Main's tool tests cannot prove the direct composer selects steering, or distinguish it from follow-up.
 for (const followUp of [false, true]) {
-	test(`direct job composer ${followUp ? "explicit follow-up waits for the final boundary in order" : "defaults to steering at the post-tool boundary in the same run"}`, { timeout: 10_000 }, async (t) => {
+	test(`direct job composer ${followUp ? "Command-Shift-Enter follow-up waits for the final boundary in order" : "defaults to steering at the post-tool boundary in the same run"}`, { timeout: 10_000 }, async (t) => {
 		const entered = Promise.withResolvers<void>();
 		const releaseTool = Promise.withResolvers<void>();
 		const nextRequest = Promise.withResolvers<string>();
@@ -484,13 +484,12 @@ for (const followUp of [false, true]) {
 			dashboard.render(160);
 			await dashboard.handleInput("\t");
 			await dashboard.handleInput("\r"); // Pin + composer, with no extra Tab needed.
-			if (followUp) await dashboard.handleInput("\x1bs");
 			const marker = "late direction\nkeep this formatting";
 			await dashboard.handleInput(marker);
-			await dashboard.handleInput("\r"); // Must return while the executing tool is still held.
+			await dashboard.handleInput(followUp ? "\x1b[13;10u" : "\r"); // Admission returns while the tool is held.
 			if (followUp) {
 				await dashboard.handleInput("second queued message");
-				await dashboard.handleInput("\r");
+				await dashboard.handleInput("\x1b[13;10u"); // Each follow-up is explicitly one-shot.
 			}
 			assert.equal(toolFinished, false, "admission must not interrupt or wait for the executing tool");
 			assert.deepEqual(requests, ["original work"], "no concurrent model turn starts on admission");

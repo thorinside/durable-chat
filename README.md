@@ -357,7 +357,7 @@ Folders outside home remain absolute. Allow program-controlled titles in your te
 | `Ctrl-T` | switch composer target main ↔ selected job |
 | `Ctrl-N` | new job brief |
 | `Ctrl-X` | toggle context pane; saved in the active config (`Alt-C` alias for literal `ESC c` input) |
-| `Alt-S` | steer vs follow-up for the current target (main or job) |
+| `Command-Shift-Enter` | queue one follow-up from the composer, if the terminal reports it (`/send <id> <message>` fallback) |
 | `Ctrl-V` | paste an image into the composer (main only) |
 | `Enter` | send, or pin the highlighted job and focus the composer; confirm prompts |
 | `Shift-Enter` | insert a newline in the composer (`Ctrl-J` or `Alt-Enter` fallback) |
@@ -427,12 +427,19 @@ without aborting a tool or starting a concurrent turn. It cannot change a model 
 The job stays live through its steering response, using the same durable admission/tracking as Main's
 `task` steer action; a "steering queued" notice is not a delivery or completion claim.
 
-`Alt-S` explicitly chooses follow-up instead: it waits until the current run ends, preserving queued
-message order. This choice is remembered per job, independently of Main (which still defaults to
-follow-up). Completed job conversations default to follow-up/continuation; explicit steering of an idle,
-finished, or finishing job is refused and leaves the draft intact. A just-starting job without an active
-run may also refuse steering; retry once it is running. Images remain Main-only and are retained if a
-job send is refused. Failed admissions retain text for correction/retry.
+**Command-Shift-Enter** queues a one-shot follow-up instead: it waits until the current run ends,
+preserving queued message order. The next plain Enter still steers a running job; there is no sticky
+input-mode toggle. Main Enter still sends follow-up, and completed job conversations default to
+follow-up/continuation. Explicit steering of an idle, finished, or finishing job is refused and leaves
+the draft intact. A just-starting job without an active run may also refuse steering; retry once it is
+running. Images remain Main-only and are retained if a job send is refused. Failed admissions retain
+text for correction/retry.
+
+The shortcut requires the terminal to transmit Command as Super plus Shift in CSI-u/Kitty input.
+macOS or terminal key bindings may intercept it; legacy input cannot distinguish it, and xterm
+modifyOtherKeys has no distinct Super modifier. dchat does not change terminal settings or infer
+Command from ordinary Enter. Use `/send` below when the gesture is unavailable. Shift-Enter remains
+newline; Option-S (`ß`) remains text. Alt-S no longer toggles an input mode.
 
 `/send <id> <message>` explicitly queues follow-up; `/steer <id> <message>` explicitly requests
 steering without changing the pinned target. The CLI equivalent is `task send <id> "<message>" --steer`.
