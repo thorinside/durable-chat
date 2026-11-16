@@ -358,8 +358,13 @@ line breaks (CRLF and CR normalize to LF) without sending. Large pastes appear a
 markers; their complete text, not the marker, is sent. Visual wrapping adds no newline characters,
 and text copied without line breaks cannot have its original layout reconstructed.
 Pane headings, the target/status line, and individual jobs have spacer rows; the transcript has a solid
-black background. While targeting `main`, newly arriving jobs are highlighted automatically. Returning
-to `main` selects the newest visible job; manual browsing between arrivals and pinned job targets are
+black background. Tab to jobs, then `j/k` or Up/Down to preview the highlighted job's latest transcript
+and live updates without pressing Enter. `g/G` preview the first/last row. Previewing never changes the
+composer or action target: **Enter pins the job** and focuses its transcript; `Ctrl-T` explicitly toggles
+the target. Tab from jobs to transcript keeps the preview for scrolling; returning to the composer
+restores the pinned target's transcript and keeps your draft. Confirmations still name the pinned target.
+While targeting `main`, newly arriving jobs are highlighted automatically unless you are browsing a
+preview. Returning to `main` selects the newest visible job; manual browsing and pinned targets are
 preserved. A single `Ctrl-C` clears the input or stops waiting as before; a second consecutive press
 within 1.5 seconds requests quit. Typing, navigation, or expiry resets that sequence. Live work still
 gets the floating confirmation; `Ctrl-Q` is no longer a quit shortcut.

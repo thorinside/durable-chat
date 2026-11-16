@@ -235,12 +235,18 @@ Implemented choices:
 - Full-screen **alt-screen** dashboard; default focus is the **composer** so chat is immediate.
 - **Tab** is the action boundary: plain `n/c/m/R/s/a` work outside the composer, so typing never triggers
   an action. `Ctrl-N` opens a new-job brief from anywhere.
-- `m`/`R` act on the **pinned target**; `Enter` pins the highlighted job; `Ctrl-T` toggles main ↔ job.
+- `m`/`R`/`c` act on the **pinned target**; `Enter` pins the highlighted job; `Ctrl-T` toggles main ↔ job.
+- Entering jobs focus and moving with `j/k`, arrows, or `g/G` previews the highlighted job immediately,
+  including its live watch. This does not change the composer/action target or draft. Tab to transcript
+  keeps the preview for scrolling; returning to composer restores the pinned target's transcript.
+  New arrivals do not steal a preview selection. Switching rows resets to the latest messages, stops
+  the old job watch, and reloads fresh history; late reads cannot replace a newer selection.
+  Startup rows without a conversation retry on graph-driven job refresh. Main stays subscribed.
 - Tool output is collapsed by default and toggled with `t` (rather than per-entry expansion).
 - `f` toggles finished jobs; `/` filters by id, brief, or status only outside the composer. In the
   composer, slash commands dispatch to native TUI actions without becoming model input; `/filter`
   opens the filter explicitly.
-- `y` copies the target's answer/last assistant message via OSC 52.
+- `y` copies the displayed job's answer/last assistant message via OSC 52 (including previews).
 - The inspector's `e` suspends the TUI, opens the config in `$VISUAL`/`$EDITOR`, validates it, and
   restarts the TUI; provider/store changes need a process restart to take effect.
 - Steering and host notices use native submissions: `Conversation.submit` with `whenBusy: "steer"` or
