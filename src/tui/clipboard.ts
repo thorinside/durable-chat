@@ -38,7 +38,7 @@ function pbcopy(text: string, env: NodeJS.ProcessEnv): Promise<void> {
 
 /** Shared by transcript selection and keyboard answer copy. Never reads the clipboard. */
 export function createTextCopier(options: ClipboardOptions = {}): CopyText {
-	return async (text) => {
+	const copy: CopyText = async (text) => {
 		const env = options.env ?? process.env;
 		const platform = options.platform ?? process.platform;
 		const remote = Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.SSH_TTY);
@@ -64,6 +64,14 @@ export function createTextCopier(options: ClipboardOptions = {}): CopyText {
 		} catch {
 			return "Copy failed: clipboard transport unavailable.";
 		}
+	};
+	// Selection and keyboard copies share this queue. Keep native writes and their
+	// fallback together so an older completion cannot overwrite a newer request.
+	let pending = Promise.resolve();
+	return (text) => {
+		const result = pending.then(() => copy(text));
+		pending = result.then(() => undefined, () => undefined);
+		return result;
 	};
 }
 

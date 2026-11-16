@@ -8,7 +8,7 @@ const local = { platform: "darwin" as const, isTTY: true, env: { TERM_PROGRAM: "
 const forbidden = () => assert.fail("must not read the clipboard or use an unintended transport");
 
 // Mouse tests inject a successful copier; they cannot protect the real transport choice.
-function mockPbcopy(t: TestContext) {
+function mockPbcopy(t: TestContext, onSpawn?: () => void) {
 	const calls: { command: string; args: string[]; options: { shell: boolean; timeout: number; env: NodeJS.ProcessEnv; stdio: string[] }; text?: string; encoding?: string }[] = [];
 	const children: (EventEmitter & { stdin: EventEmitter & { end: (text: string, encoding: string) => void } })[] = [];
 	t.mock.method(childProcess, "spawn", (command: string, args: string[], options: typeof calls[number]["options"]) => {
@@ -18,6 +18,7 @@ function mockPbcopy(t: TestContext) {
 			end: (text: string, encoding: string) => { call.text = text; call.encoding = encoding; },
 		}) });
 		children.push(child);
+		onSpawn?.();
 		return child as never;
 	});
 	return { calls, children };
@@ -59,12 +60,103 @@ test("pbcopy launch, stdin, exit and timeout failures never fall back to mislead
 	const { children } = mockPbcopy(t);
 	for (const failure of ["launch", "stdin", "exit", "timeout"]) {
 		const pending = createTextCopier({ ...local, nativeClipboard: () => undefined, write: forbidden })("text");
+		await Promise.resolve(); // The copier starts each transport through its queue.
 		const child = children.at(-1)!;
 		if (failure === "launch") child.emit("error", Object.assign(new Error("missing"), { code: "ENOENT" }));
 		if (failure === "stdin") child.stdin.emit("error", Object.assign(new Error("closed"), { code: "EPIPE" }));
 		child.emit("close", failure === "stdin" ? 0 : 1, failure === "timeout" ? "SIGTERM" : null);
 		assert.match(String(await pending), /Copy failed/);
 	}
+});
+
+// Single-request transport tests cannot catch an older write/fallback overwriting a newer copy.
+test("concurrent native copies finish in request order and leave the latest text on the clipboard", async (t) => {
+	t.mock.method(childProcess, "spawn", forbidden);
+	const started = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+	const finish = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+	const writes: string[] = [];
+	let clipboardText = "";
+	const copy = createTextCopier({ ...local, write: forbidden, nativeClipboard: () => ({
+		getText: forbidden, getImage: forbidden,
+		setText: async (text) => {
+			const index = writes.push(text) - 1;
+			started[index]!.resolve();
+			await finish[index]!.promise;
+			clipboardText = text;
+		},
+	}) });
+	const first = copy("FIRST");
+	let secondFinished = false;
+	const second = copy("SECOND").then((result) => { secondFinished = true; return result; });
+	await started[0]!.promise;
+	assert.deepEqual(writes, ["FIRST"], "newer writes must wait for the older native write");
+	assert.equal(secondFinished, false);
+	// Even if the second transport could finish first, it must not start yet.
+	finish[1]!.resolve();
+	finish[0]!.resolve();
+	assert.equal(await first, true);
+	assert.equal(await second, true);
+	assert.deepEqual(writes, ["FIRST", "SECOND"]);
+	assert.equal(clipboardText, "SECOND");
+});
+
+test("a delayed native failure and its pbcopy fallback finish before the next copy starts", async (t) => {
+	const spawned = Promise.withResolvers<void>();
+	const { calls, children } = mockPbcopy(t, () => spawned.resolve());
+	const nativeStarted = Promise.withResolvers<void>();
+	const nativeFailure = Promise.withResolvers<void>();
+	const writes: string[] = [];
+	let clipboardText = "";
+	const copy = createTextCopier({ ...local, write: forbidden, nativeClipboard: () => ({
+		getText: forbidden, getImage: forbidden,
+		setText: async (text) => {
+			writes.push(text);
+			if (text === "FIRST") {
+				nativeStarted.resolve();
+				await nativeFailure.promise;
+				throw new Error("native unavailable");
+			}
+			clipboardText = text;
+		},
+	}) });
+	const first = copy("FIRST");
+	const second = copy("SECOND");
+	await nativeStarted.promise;
+	assert.deepEqual(writes, ["FIRST"]);
+	nativeFailure.resolve();
+	await spawned.promise;
+	assert.deepEqual(writes, ["FIRST"], "the fallback is part of the same queued operation");
+	assert.equal(calls[0]!.text, "FIRST");
+	clipboardText = calls[0]!.text!; // Simulate pbcopy committing stdin before its successful exit.
+	children[0]!.emit("close", 0, null);
+	assert.equal(await first, true);
+	assert.equal(await second, true);
+	assert.deepEqual(writes, ["FIRST", "SECOND"]);
+	assert.equal(clipboardText, "SECOND");
+});
+
+test("a failed native write and failed pbcopy do not poison subsequent queued copies", async (t) => {
+	const spawned = Promise.withResolvers<void>();
+	const { children } = mockPbcopy(t, () => spawned.resolve());
+	const writes: string[] = [];
+	let clipboardText = "";
+	const copy = createTextCopier({ ...local, write: forbidden, nativeClipboard: () => ({
+		getText: forbidden, getImage: forbidden,
+		setText: async (text) => {
+			writes.push(text);
+			if (text === "FIRST") throw new Error("native unavailable");
+			clipboardText = text;
+		},
+	}) });
+	const first = copy("FIRST");
+	const second = copy("SECOND");
+	await spawned.promise;
+	assert.deepEqual(writes, ["FIRST"]);
+	children[0]!.emit("close", 1, null);
+	assert.match(String(await first), /Copy failed/);
+	assert.equal(await second, true);
+	assert.deepEqual(writes, ["FIRST", "SECOND"]);
+	assert.equal(clipboardText, "SECOND");
 });
 
 test("SSH never writes the remote macOS clipboard and OSC 52 sends exact text without claiming confirmed delivery", async (t) => {

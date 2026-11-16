@@ -387,11 +387,12 @@ test("partial-line copy preserves deliberately selected internal spaces at the s
 });
 
 test("native copy clears the highlight only after the clipboard writer completes", async (t) => {
+	const started = Promise.withResolvers<void>();
 	const completed = Promise.withResolvers<void>();
 	const texts: string[] = [];
 	const copy = createTextCopier({ platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal" }, isTTY: true,
 		nativeClipboard: () => ({ getText: () => assert.fail("no reads"), getImage: () => assert.fail("no reads"),
-			setText: (text) => { texts.push(text); return completed.promise; } }),
+			setText: (text) => { texts.push(text); started.resolve(); return completed.promise; } }),
 		write: () => assert.fail("no OSC 52 for local Terminal"),
 	});
 	const app = await fixture(t, 0, "copy-native", copy);
@@ -399,6 +400,7 @@ test("native copy clears the highlight only after the clipboard writer completes
 	const y = before.findIndex((line) => line.includes("copy-native"));
 	const x = before[y]!.indexOf("copy-native");
 	pointer(app, "press", x, y); pointer(app, "drag", x + 10, y); pointer(app, "release", x + 10, y);
+	await started.promise;
 	assert.deepEqual(texts, ["copy-native"]);
 	assert.ok(highlightedRows(app).length > 0);
 	completed.resolve();
