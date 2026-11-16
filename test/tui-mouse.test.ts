@@ -119,10 +119,11 @@ test("wheel hit testing follows narrow and resized pane geometry", async (t) => 
 		assert.doesNotMatch(pane(app.wheel(x, "up", 12), "TRANSCRIPT"), /entry-20/);
 		assert.match(pane(app.wheel(x, "down", 12), "TRANSCRIPT"), /entry-20/);
 	}
-	// A manually enabled context pane below the default breakpoint must use the same bounds as rendering.
+	// Manual resizing must no longer force context into a terminal that is too narrow.
 	app.input("\t");
 	app.input("{");
-	const resized = app.frame();
+	assert.doesNotMatch(app.frame()[2]!, /CONTEXT/);
+	const resized = app.resize(160);
 	const x = resized[2]!.indexOf("CONTEXT") + 1;
 	assert.ok(x > 0);
 	const after = app.wheel(x, "down", 40);
@@ -486,4 +487,53 @@ test("keyboard answer copy uses the same clipboard facility and keeps the full u
 	for (let index = 0; index < 4; index++) await Promise.resolve();
 	assert.deepEqual(texts, [answer]);
 	assert.match(app.frame().join("\n"), /copied to clipboard/);
+});
+
+test("context visibility toggling invalidates selection coordinates and copy stays inside the widened transcript", async (t) => {
+	const app = await fixture(t, 0, "context-toggle-copy-target");
+	app.input("keep this draft");
+	let { x, top } = transcriptBounds(app);
+	pointer(app, "press", x, top);
+	pointer(app, "drag", x + 8, top + 2);
+	assert.ok(highlightedRows(app).length > 0);
+	app.input("\x18"); // Ctrl-X must invalidate stale copy coordinates too.
+	assert.doesNotMatch(app.frame()[2]!, /CONTEXT/);
+	assert.deepEqual(highlightedRows(app), []);
+	for (const enabled of [false, true]) {
+		if (enabled) app.input("\x18");
+		const frame = app.frame();
+		const y = frame.findIndex((line) => line.includes("context-toggle-copy-target"));
+		x = frame[y]!.indexOf("context-toggle-copy-target");
+		pointer(app, "press", x, y);
+		pointer(app, "drag", 180, y);
+		pointer(app, "release", 180, y);
+		assert.equal(app.copied.at(-1), "context-toggle-copy-target");
+		await Promise.resolve();
+		app.frame();
+	}
+	app.input("!");
+	assert.match(app.frame().join("\n"), /keep this draft!/);
+});
+
+test("context toggle under the context pointer preserves job preview selection and the main composer target", async (t) => {
+	const app = await fixture(t, 2);
+	app.input("main draft");
+	app.input("\t");
+	const before = app.frame();
+	const selected = pane(before, "JOBS").match(/▸ #\d+/)?.[0];
+	assert.ok(selected);
+	const preview = pane(before, "TRANSCRIPT").split("\n")[0];
+	const contextX = before[2]!.indexOf("CONTEXT") + 1;
+	app.wheel(contextX, "down", 2);
+	app.input("\x18");
+	const after = app.frame();
+	assert.doesNotMatch(after[2]!, /CONTEXT/);
+	assert.match(pane(after, "JOBS"), new RegExp(selected));
+	assert.equal(pane(after, "TRANSCRIPT").split("\n")[0]?.trimEnd(), preview?.trimEnd());
+	assert.match(after.join("\n"), /to main › main draft/);
+	app.input("j");
+	assert.doesNotMatch(pane(app.frame(), "JOBS"), new RegExp(selected), "job keyboard focus stays active");
+	app.input("\x1b[Z"); // Shift-Tab returns from jobs to the original main draft.
+	app.input("!");
+	assert.match(app.frame().join("\n"), /to main › main draft!/);
 });

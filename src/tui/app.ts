@@ -7,7 +7,7 @@ import type { TaskGraph, TaskGraphNode, TaskGraphWatch, TaskId, UserInput } from
 import type { AppRuntime } from "../harness.ts";
 import { selectModel, type ModelChoice, type RuntimeNotice } from "../models.ts";
 import { rollbackChoices, rollbackSource } from "../rollback.ts";
-import { describeConfig } from "../config.ts";
+import { describeConfig, setConfigValue } from "../config.ts";
 import { parseId } from "../commands.ts";
 import { jobView } from "../format.ts";
 import {
@@ -41,6 +41,9 @@ const CHROME_ROWS = 8; // Header + spacer, status spacer + status, three compose
 const PANE_HEADING_ROWS = 2; // Title + spacer.
 const MIN_ROWS = CHROME_ROWS + PANE_HEADING_ROWS + 1;
 const JOB_ROW_HEIGHT = 3; // Status, brief, and a spacer between jobs.
+const CONTEXT_BREAKPOINT = 140;
+const MIN_CONTEXT_WIDTH = 26;
+const MIN_TRANSCRIPT_WITH_CONTEXT = 80;
 
 function shortcut(keys: string, description: string): string {
 	return `${bold(keys.toUpperCase())} ${fg(description, MUTED)}`;
@@ -416,10 +419,24 @@ export class Dashboard implements Component {
 	}
 
 	private resizeContext(delta: number): void {
-		const max = Math.max(20, Math.min(48, Math.floor(this.lastWidth * 0.4)));
-		const current = this.state.contextPane ?? (this.lastWidth >= 110 ? this.contextWidth(this.lastWidth) : 30);
-		this.state.contextPane = Math.max(20, Math.min(max, current + delta));
+		const current = this.state.contextPane ?? (this.contextWidth(this.lastWidth) || 30);
+		this.state.contextPane = Math.max(MIN_CONTEXT_WIDTH, Math.min(48, current + delta));
 		this.renderSoon();
+	}
+
+	private setContextPanel(visible = this.runtime.config.contextPanel === false): void {
+		try {
+			// Edit the resolved highest-precedence file, not a lower global layer or conversation.
+			setConfigValue(this.runtime.config.configPath, "contextPanel", String(visible));
+			this.runtime.config.contextPanel = visible;
+			this.runtime.config.configFound = true;
+			if (!this.runtime.config.configPaths.includes(this.runtime.config.configPath)) this.runtime.config.configPaths.push(this.runtime.config.configPath);
+			this.flash(visible
+				? `Context panel enabled${this.contextWidth(this.lastWidth) === 0 ? " (hidden until there is room)" : ""}; saved`
+				: "Context panel off; saved");
+		} catch (error) {
+			this.flash(`Could not save context panel preference: ${message(error)}`, "error");
+		}
 	}
 
 	private beginPrompt(mode: Exclude<UiMode, "help" | "inspector" | `confirm${string}`>): void {
@@ -649,6 +666,11 @@ export class Dashboard implements Component {
 				return;
 			case "info":
 				this.state.mode = "inspector";
+				return;
+			case "context":
+				if (tail === "" || tail === "toggle") this.setContextPanel();
+				else if (tail === "on" || tail === "off") this.setContextPanel(tail === "on");
+				else throw new Error("Usage: /context [on|off|toggle]");
 				return;
 			case "model": {
 				if (this.onModel === undefined) throw new Error("Model switching is unavailable here.");
@@ -993,11 +1015,11 @@ export class Dashboard implements Component {
 	}
 
 	private contextWidth(width: number): number {
-		if (this.state.contextPane !== undefined) {
-			if (width < 76) return 0;
-			return Math.max(20, Math.min(this.state.contextPane, Math.max(20, width - this.jobsWidth(width) - 32)));
-		}
-		return width >= 110 ? Math.max(26, Math.min(36, Math.round(width * 0.23))) : 0;
+		if (this.runtime.config.contextPanel === false || width < CONTEXT_BREAKPOINT) return 0;
+		const available = width - this.jobsWidth(width) - 2 - MIN_TRANSCRIPT_WITH_CONTEXT;
+		if (available < MIN_CONTEXT_WIDTH) return 0;
+		const preferred = this.state.contextPane ?? Math.max(MIN_CONTEXT_WIDTH, Math.min(36, Math.round(width * 0.2)));
+		return Math.min(preferred, available);
 	}
 
 	private async copy(): Promise<void> {
@@ -1277,9 +1299,9 @@ export class Dashboard implements Component {
 		else if (this.state.mode === "confirmReboot") hint = [shortcut("Y", "reboot"), shortcut("ENTER / N / ESC", "cancel")].join(separator);
 		else if (this.state.mode === "confirmCancel" || this.state.mode === "confirmReset" || this.state.mode === "confirmQuit" || this.state.mode === "confirmAbortMain") hint = [shortcut("Y / ENTER", "confirm"), shortcut("N / ESC", "cancel")].join(separator);
 		else if (this.actionLabel !== undefined) hint = shortcut("CTRL-C", "stop waiting (work stays durable)");
-		else if (this.state.focus === "composer") hint = [shortcut("ENTER", "send"), shortcut("SHIFT-ENTER", "newline"), shortcut("CTRL-C ×2", "quit"), shortcut("TAB", "jobs"), shortcut("CTRL-T", "target"), shortcut("CTRL-N", "new job"), shortcut("CTRL-V", "paste image"), ...(this.attachments.length === 0 ? [] : [fg(`${this.attachments.length} attached`, YELLOW)])].join(separator);
-		else if (this.state.focus === "jobs") hint = [shortcut("J/K", "select"), shortcut("ENTER", "open"), shortcut("N", "new"), shortcut("C", "cancel"), shortcut("M/SHIFT-R", "compact/reset"), shortcut("I", "info"), shortcut("TAB", "focus")].join(separator);
-		else hint = [shortcut("J/K", "scroll"), shortcut("G/SHIFT-G", "oldest/newest"), shortcut("T", "tools"), shortcut("S", "send"), shortcut("C", "cancel"), shortcut("ESC", "main"), shortcut("TAB", "focus")].join(separator);
+		else if (this.state.focus === "composer") hint = [shortcut("ENTER", "send"), shortcut(this.input.getValue().length === 0 ? "?" : "TAB ?", "help"), shortcut("TAB", "focus"), shortcut("SHIFT-ENTER", "newline"), ...(this.attachments.length === 0 ? [] : [fg(`${this.attachments.length} attached`, YELLOW)])].join(separator);
+		else if (this.state.focus === "jobs") hint = [shortcut("ENTER", "open"), shortcut("?", "help"), shortcut("J/K", "select"), shortcut("TAB", "focus")].join(separator);
+		else hint = [shortcut("J/K", "scroll"), shortcut("?", "help"), shortcut("S", "compose"), shortcut("TAB", "focus")].join(separator);
 		if (this.scroll > 0 && this.state.focus === "transcript") hint += dim(` · ↑${this.scroll}`);
 		return truncateToWidth(` ${hint}`, width, "", true);
 	}
@@ -1287,6 +1309,7 @@ export class Dashboard implements Component {
 	private renderHelp(width: number, height: number): string[] {
 		const bindings: [string, string][] = [
 			["TAB / SHIFT-TAB", "cycle composer, jobs, transcript"],
+			["CTRL-X", "toggle context pane (saved in active config)"],
 			["CTRL-T", "target main ↔ selected job"],
 			["CTRL-N", "new job brief"],
 			["SHIFT-ENTER", "insert a newline (Ctrl-J or Alt-Enter fallback); Enter sends"],
@@ -1307,6 +1330,7 @@ export class Dashboard implements Component {
 		];
 		return this.panel("Help", [
 			bold("Slash commands (composer)"),
+			"/context off · /context on · /context toggle",
 			"/help · /info · /tasks · /task <id> · /log <id>",
 			"/new [brief] · /send <id> <text> · /steer <id> <text>",
 			"/cancel <id> · /compact [focus] · /reset [handoff]",
@@ -1479,6 +1503,13 @@ export class Dashboard implements Component {
 			if (matchesKey(data, "enter")) return this.submit();
 			this.input.handleInput(data);
 			this.renderSoon();
+			return;
+		}
+		// Ctrl-X is unused by the editor and has an unambiguous legacy control byte.
+		// Keep only literal Meta-C as an alias: extended Alt-C matching can also
+		// match printable non-Latin keys via Kitty's base-layout key fallback.
+		if (matchesKey(data, "ctrl+x") || data === "\x1bc") {
+			this.setContextPanel();
 			return;
 		}
 		if (matchesKey(data, "ctrl+t")) {

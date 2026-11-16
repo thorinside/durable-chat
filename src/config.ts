@@ -53,6 +53,7 @@ export type ResolvedConfig = {
 	jobMaxTurns: number;
 	autoContinue: boolean;
 	codemode: boolean;
+	contextPanel: boolean;
 	mcp: McpConfig;
 };
 
@@ -71,6 +72,7 @@ type RawConfig = {
 	jobMaxTurns?: number;
 	autoContinue?: boolean;
 	codemode?: boolean;
+	contextPanel?: boolean;
 	providers?: Record<string, Record<string, unknown>>;
 	mcp?: {
 		enabled?: boolean;
@@ -88,7 +90,7 @@ export function parseThinkingLevel(raw: string): ModelThinkingLevel {
 }
 const KNOWN_KEYS = new Set([
 	"store", "provider", "model", "baseUrl", "apiKeyEnv", "contextWindow", "maxTokens",
-	"streamTimeoutMs", "retries", "thinkingLevel", "maxTurns", "jobMaxTurns", "autoContinue", "codemode", "providers", "mcp",
+	"streamTimeoutMs", "retries", "thinkingLevel", "maxTurns", "jobMaxTurns", "autoContinue", "codemode", "contextPanel", "providers", "mcp",
 ]);
 const KNOWN_MCP_KEYS = new Set(["enabled", "servers", "tools", "config"]);
 const KNOWN_PROVIDER_KEYS = new Set([
@@ -110,6 +112,7 @@ const BUILTIN = {
 	jobMaxTurns: 120,
 	autoContinue: true,
 	codemode: true,
+	contextPanel: true,
 };
 
 function expandHome(value: string): string {
@@ -233,6 +236,7 @@ function validate(path: string, raw: unknown, warnings: string[]): RawConfig {
 	if (record.jobMaxTurns !== undefined) config.jobMaxTurns = readNumber(path, "jobMaxTurns", record.jobMaxTurns, 1000);
 	if (record.autoContinue !== undefined) config.autoContinue = readBoolean(path, "autoContinue", record.autoContinue);
 	if (record.codemode !== undefined) config.codemode = readBoolean(path, "codemode", record.codemode);
+	if (record.contextPanel !== undefined) config.contextPanel = readBoolean(path, "contextPanel", record.contextPanel);
 	if (record.providers !== undefined) {
 		if (typeof record.providers !== "object" || record.providers === null || Array.isArray(record.providers)) {
 			throw new ConfigError(path, "providers", "must be a mapping of provider names to settings");
@@ -420,6 +424,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}, env: NodeJS.Proce
 		jobMaxTurns,
 		autoContinue,
 		codemode,
+		contextPanel: raw.contextPanel ?? BUILTIN.contextPanel,
 		mcp: {
 			enabled: mcpEnabled,
 			servers: envServers ?? raw.mcp?.servers ?? ["substrate"],
@@ -446,6 +451,8 @@ jobMaxTurns: 120
 autoContinue: true
 # QuickJS scripts that call the conversation's tools; only the script's output comes back.
 codemode: true
+# Ctrl-X toggles this in the dashboard; enabled context still hides when space is limited.
+contextPanel: true
 # More than one provider can be configured. The provider key selects the active entry by name, and
 # each entry inherits the values above for keys it does not set. Entry names are provider ids.
 # providers:
@@ -498,6 +505,7 @@ export function describeConfig(config: ResolvedConfig): string[] {
 		`jobMaxTurns: ${config.jobMaxTurns}`,
 		`autoContinue: ${config.autoContinue}`,
 		`codemode: ${config.codemode ? "enabled" : "disabled"}`,
+		`contextPanel: ${config.contextPanel}`,
 		`apiKey: ${config.apiKey === undefined ? "(none)" : config.apiKeyEnv === undefined ? "(set)" : `from ${config.apiKeyEnv}`}`,
 		`mcp: ${config.mcp.enabled ? "enabled" : "disabled"}, servers: ${config.mcp.servers.join(", ") || "(none)"}`,
 		...(config.mcp.tools.length === 0 ? [] : [`mcp extra tools: ${config.mcp.tools.join(", ")}`]),
@@ -522,6 +530,7 @@ const KEY_PATHS: Record<string, readonly string[]> = {
 	jobMaxTurns: ["jobMaxTurns"],
 	autoContinue: ["autoContinue"],
 	codemode: ["codemode"],
+	contextPanel: ["contextPanel"],
 	providers: ["providers"],
 	"mcp.enabled": ["mcp", "enabled"],
 	"mcp.servers": ["mcp", "servers"],
@@ -628,6 +637,7 @@ export function effectiveValue(config: ResolvedConfig, key: string): string {
 		case "jobMaxTurns": return String(config.jobMaxTurns);
 		case "autoContinue": return String(config.autoContinue);
 		case "codemode": return String(config.codemode);
+		case "contextPanel": return String(config.contextPanel);
 		case "mcp.enabled": return String(config.mcp.enabled);
 		case "mcp.servers": return config.mcp.servers.join(", ") || "(none)";
 		case "mcp.tools": return config.mcp.tools.join(", ") || "(none)";
