@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { createRegistry, defineExtension, defineTool, Harness, ProviderDoc } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, ProviderDoc } from "@earendil-works/pi-durable";
 import type { Conversation, Extension } from "@earendil-works/pi-durable";
 import { obj } from "@earendil-works/pi-schema";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -15,12 +15,14 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { applyStartupJobModel, createJobInCommit, findJobConversation, MAIN_INSTRUCTIONS, scanJobs } from "../src/jobs.ts";
-import { JobHandoffDoc, JobTask } from "../src/tasks.ts";
+import { JobHandoffDoc, JobLink, JobTask } from "../src/tasks.ts";
 import { JobHandoffTools } from "../src/handoff.ts";
 import { createTaskExtension } from "../src/tool.ts";
 import { selectForkSource } from "../src/forks.ts";
 import { ensureWorkspace, jobEnvironment, planWorkspace } from "../src/workspaces.ts";
 import { JobTags, resolveTaggedSource } from "../src/tags.ts";
+import type { AppRuntime } from "../src/harness.ts";
+import { Dashboard } from "../src/tui/app.ts";
 
 async function fixture(t: TestContext, respond: FauxResponseFactory, extraJobExtensions: readonly Extension[] = []) {
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), "dchat-context-forks-")));
@@ -437,3 +439,88 @@ test("main steering rejects invalid targets and idle or finished jobs without st
 	assert.deepEqual((await worker.entries({ order: "ascending" }, 100, undefined, context)).items, before);
 	assert.equal((await scanJobs(harness, context)).length, 1);
 });
+
+// Main's tool tests cannot prove the direct composer selects steering, or distinguish it from follow-up.
+for (const followUp of [false, true]) {
+	test(`direct job composer ${followUp ? "explicit follow-up waits for the final boundary in order" : "defaults to steering at the post-tool boundary in the same run"}`, { timeout: 10_000 }, async (t) => {
+		const entered = Promise.withResolvers<void>();
+		const releaseTool = Promise.withResolvers<void>();
+		const nextRequest = Promise.withResolvers<string>();
+		const releaseAnswer = Promise.withResolvers<void>();
+		t.after(() => { releaseTool.resolve(); releaseAnswer.resolve(); });
+		let toolFinished = false;
+		const requests: string[] = [];
+		const controlled = defineExtension({ name: "test.direct-input", tools: [defineTool({
+			name: "controlled_boundary", description: "A controlled tool boundary.", parameters: obj({}), replay: "safe",
+			execute: async () => {
+				entered.resolve();
+				await releaseTool.promise;
+				toolFinished = true;
+				return { output: [{ type: "text", text: "Tool finished normally." }] };
+			},
+		})] });
+		const env = await fixture(t, async ({ messages }) => {
+			const input = latestUser(messages);
+			requests.push(input);
+			if (input === "original work" && messages.at(-1)?.role !== "toolResult") {
+				return fauxAssistantMessage(fauxToolCall("controlled_boundary", {}), { stopReason: "toolUse" });
+			}
+			nextRequest.resolve(input);
+			await releaseAnswer.promise;
+			return fauxAssistantMessage(input === "original work" ? "Original answer." : `Handled: ${input}`);
+		}, [controlled]);
+		const { harness, root, model, jobExtensions } = env.session;
+		const started = await root.commit((tx) => createJobInCommit(tx, "original work", model, jobExtensions, env.repo, { maxTurns: 20, thinkingLevel: "off", autoContinue: false }), context);
+		harness.resume();
+		await entered.promise;
+		const worker = (await findJobConversation(harness, Number(started.taskId), context))!;
+		const originalRun = (await harness.snapshot(LiveDoc, worker.id, context))!.run!;
+		const dashboard = new Dashboard({
+			runtime: { root, harness, context, config: { contextWindow: 128000, configPath: "/unused", thinkingLevel: "off" }, modelLabel: "faux", storePath: join(env.dir, "store.sqlite"), jobExtensions } as unknown as AppRuntime,
+			rows: () => 24, requestRender() {}, onQuit() {},
+		});
+		try {
+			await dashboard.start();
+			dashboard.render(160);
+			await dashboard.handleInput("\t");
+			await dashboard.handleInput("\r"); // Pin + composer, with no extra Tab needed.
+			if (followUp) await dashboard.handleInput("\x1bs");
+			const marker = "late direction\nkeep this formatting";
+			await dashboard.handleInput(marker);
+			await dashboard.handleInput("\r"); // Must return while the executing tool is still held.
+			if (followUp) {
+				await dashboard.handleInput("second queued message");
+				await dashboard.handleInput("\r");
+			}
+			assert.equal(toolFinished, false, "admission must not interrupt or wait for the executing tool");
+			assert.deepEqual(requests, ["original work"], "no concurrent model turn starts on admission");
+			assert.equal((await harness.snapshot(LiveDoc, worker.id, context))!.run!.taskId, originalRun.taskId);
+			const inbox = (await harness.snapshot(InboxDoc, worker.id, context))!.items;
+			assert.deepEqual(inbox.map((item) => item.mode), followUp ? ["followUp", "followUp"] : ["steer"]);
+			assert.deepEqual(inbox.map((item) => "content" in item ? item.content : undefined), followUp ? [marker, "second queued message"] : [marker]);
+			assert.doesNotMatch(JSON.stringify((await worker.entries({ order: "ascending" }, 100, undefined, context)).items), /late direction/);
+			if (!followUp) assert.equal((await harness.snapshot(JobLink, started.taskId, context))?.steering?.message, marker);
+			assert.equal((await root.entries({ order: "ascending" }, 100, undefined, context)).items.filter((entry) => entry.kind === "pi.user").length, 0);
+			releaseTool.resolve();
+			assert.equal(await nextRequest.promise, followUp ? "original work" : marker);
+			const afterTools = (await harness.snapshot(LiveDoc, worker.id, context))!.run!;
+			assert.equal(afterTools.first, originalRun.first, "generations hand over the same logical run");
+			assert.ok(originalRun.inputs.every((id) => afterTools.inputs.includes(id)), "the original input has not settled into a successor run");
+			if (followUp) assert.equal((await harness.snapshot(InboxDoc, worker.id, context))!.items.length, 2, "follow-ups stay queued at the post-tool boundary");
+			releaseAnswer.resolve();
+			for (const item of inbox) assert.equal((await (await harness.submission(item.id, context))!.wait(context)).status, "done");
+			await harness.waitForTask(started.taskId, context);
+			const entries = (await worker.entries({ order: "ascending" }, 100, undefined, context)).items;
+			const users = entries.filter((entry) => entry.kind === "pi.user").map((entry) => latestUser(entry.model ?? []));
+			assert.deepEqual(users, followUp ? ["original work", marker, "second queued message"] : ["original work", marker]);
+			const receipt = await harness.waitForTask(started.taskId, context);
+			assert.equal(receipt.state.outcome.status, "completed");
+			if (!followUp && receipt.state.outcome.status === "completed") assert.match(receipt.state.outcome.result.answer ?? "", /Handled: late direction/);
+			if (followUp) {
+				const originalAnswer = entries.findIndex((entry) => entry.kind === "pi.assistant" && JSON.stringify(entry.model).includes("Original answer."));
+				const lateInput = entries.findIndex((entry) => entry.kind === "pi.user" && JSON.stringify(entry.model).includes("late direction"));
+				assert.ok(originalAnswer >= 0 && lateInput > originalAnswer, "follow-up lands only after the original answer");
+			}
+		} finally { await dashboard.stop(); }
+	});
+}
