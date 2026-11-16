@@ -1,4 +1,4 @@
-import { matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { getNativeClipboard } from "@earendil-works/pi-tui";
 import { withCancel } from "@earendil-works/chord/context";
@@ -34,7 +34,7 @@ import { JOB_KIND } from "../tasks.ts";
 import { TranscriptSelection } from "./selection.ts";
 import { createTextCopier, copyNotice, type CopyText } from "./clipboard.ts";
 import { openBrowser } from "./browser.ts";
-import { Composer, isComposerNewline } from "./composer.ts";
+import { Composer, isComposerNewline, isComposerQueue } from "./composer.ts";
 
 const FLASH_MS = 5000;
 const QUIT_REPEAT_MS = 1500;
@@ -79,7 +79,6 @@ type AppState = {
 	filter: string;
 	showFinished: boolean;
 	toolsExpanded: boolean;
-	steer: boolean;
 	jobsPane?: number;
 	contextPane?: number;
 };
@@ -110,10 +109,7 @@ export class Dashboard implements Component {
 		filter: "",
 		showFinished: true,
 		toolsExpanded: false,
-		steer: false,
 	};
-	/** Explicit job modes override the status-aware default, independently of Main. */
-	private readonly jobInputModes = new Map<number, boolean>();
 	private readonly main: Transcript;
 	private current: Transcript | undefined;
 	private graph: TaskGraphWatch | undefined;
@@ -384,8 +380,7 @@ export class Dashboard implements Component {
 	}
 
 	private steerInput(target = this.state.target): boolean {
-		if (target.kind === "main") return this.state.steer;
-		return this.jobInputModes.get(target.id) ?? (this.nodes.has(target.id) || this.records.get(target.id)?.state.status === "running");
+		return target.kind === "job" && (this.nodes.has(target.id) || this.records.get(target.id)?.state.status === "running");
 	}
 
 	private async openSelected(): Promise<void> {
@@ -530,7 +525,7 @@ export class Dashboard implements Component {
 		this.renderSoon();
 	}
 
-	private async submit(): Promise<void> {
+	private async submit(followUp = false): Promise<void> {
 		const value = this.input.getValue();
 		const text = value.trim();
 		if (this.state.mode === "newJob") {
@@ -639,8 +634,7 @@ export class Dashboard implements Component {
 			return;
 		}
 		const attachments = [...this.attachments];
-		let steer = this.steerInput(target);
-		const explicitJobMode = target.kind === "job" ? this.jobInputModes.get(target.id) : undefined;
+		let steer = !followUp && this.steerInput(target);
 		const admitted = () => {
 			// Admission may finish after the user has begun editing the next draft.
 			if (this.input.getValue() === value) this.input.setValue("");
@@ -661,7 +655,7 @@ export class Dashboard implements Component {
 				this.flash(steer ? "steered main" : "sent to main");
 				return;
 			}
-			if (explicitJobMode === undefined) {
+			if (!followUp) {
 				// Graph/list refresh is debounced; use the durable status for the automatic ingress default.
 				const job = await this.runtime.harness.getTask(target.id as TaskId, context);
 				if (job === undefined || job.kind !== JOB_KIND) throw new Error(`No job #${target.id}.`);
@@ -672,7 +666,7 @@ export class Dashboard implements Component {
 			} else {
 				const conversation = await findJobConversation(this.runtime.harness, target.id, context);
 				if (conversation === undefined) throw new Error(`job #${target.id} has no conversation`);
-				// Explicit follow-up also continues completed conversations; it does not steer a live run.
+				// One-shot follow-up also continues completed conversations; it does not steer a live run.
 				await conversation.submit({ ...jobInputDraft(value, false), content: value }, context);
 			}
 			admitted();
@@ -1330,7 +1324,7 @@ export class Dashboard implements Component {
 		else if (this.state.mode === "confirmReboot") hint = [shortcut("Y", "reboot"), shortcut("ENTER / N / ESC", "cancel")].join(separator);
 		else if (this.state.mode === "confirmCancel" || this.state.mode === "confirmReset" || this.state.mode === "confirmQuit" || this.state.mode === "confirmAbortMain") hint = [shortcut("Y / ENTER", "confirm"), shortcut("N / ESC", "cancel")].join(separator);
 		else if (this.actionLabel !== undefined) hint = shortcut("CTRL-C", "stop waiting (work stays durable)");
-		else if (this.state.focus === "composer") hint = [shortcut("ENTER", this.state.target.kind === "main" ? "send" : this.steerInput() ? "steer" : "queue"), ...(this.state.target.kind === "job" ? [shortcut("ALT-S", this.steerInput() ? "queue instead" : "steer instead")] : []), shortcut(this.input.getValue().length === 0 ? "?" : "TAB ?", "help"), shortcut("TAB", "focus"), shortcut("SHIFT-ENTER", "newline"), ...(this.attachments.length === 0 ? [] : [fg(`${this.attachments.length} attached`, YELLOW)])].join(separator);
+		else if (this.state.focus === "composer") hint = [shortcut("ENTER", this.state.target.kind === "main" ? "send" : this.steerInput() ? "steer" : "queue"), ...(this.state.target.kind === "job" && this.steerInput() ? [shortcut("CMD-SHIFT-ENTER", "queue")] : []), shortcut(this.input.getValue().length === 0 ? "?" : "TAB ?", "help"), shortcut("TAB", "focus"), shortcut("SHIFT-ENTER", "newline"), ...(this.attachments.length === 0 ? [] : [fg(`${this.attachments.length} attached`, YELLOW)])].join(separator);
 		else if (this.state.focus === "jobs") hint = [shortcut("ENTER", "message"), shortcut("↑/↓ J/K", "preview"), shortcut("?", "help"), shortcut("TAB", "focus")].join(separator);
 		else hint = [shortcut("↑/↓ J/K", "scroll"), shortcut("?", "help"), shortcut("S", "compose"), shortcut("TAB", "focus")].join(separator);
 		if (this.scroll > 0 && this.state.focus === "transcript") hint += dim(` · ↑${this.scroll}`);
@@ -1344,7 +1338,7 @@ export class Dashboard implements Component {
 			["CTRL-T", "target main ↔ selected job"],
 			["CTRL-N", "new job brief"],
 			["SHIFT-ENTER", "insert a newline (Ctrl-J or Alt-Enter fallback); Enter sends"],
-			["ALT-S", "steer vs follow-up for the target"],
+			["CMD-SHIFT-ENTER", "queue once from composer (if reported); /send <id> <text> fallback"],
 			["CTRL-V", "paste an image into the composer (main only)"],
 			["ENTER", "send input, or pin job and focus composer; confirm prompt"],
 			["S (JOBS)", "pin highlighted job and compose; running jobs default to steer"],
@@ -1480,6 +1474,8 @@ export class Dashboard implements Component {
 	}
 
 	handleInput(data: string): void | Promise<void> {
+		// TUI normally filters releases; keep direct dashboard delivery safe too.
+		if (isKeyRelease(data)) return;
 		this.selection.reset();
 		this.renderSoon();
 		if (matchesKey(data, "ctrl+c")) {
@@ -1552,16 +1548,8 @@ export class Dashboard implements Component {
 			this.beginPrompt("newJob");
 			return;
 		}
-		if (matchesKey(data, "alt+s")) {
-			const steer = !this.steerInput();
-			if (this.state.target.kind === "main") this.state.steer = steer;
-			else this.jobInputModes.set(this.state.target.id, steer);
-			this.flash(steer
-				? `${targetLabel(this.state.target)} input will steer at the next boundary`
-				: `${targetLabel(this.state.target)} input will queue after the current run`);
-			return;
-		}
 		if (this.state.focus === "composer") {
+			if (isComposerQueue(data)) return this.submit(true);
 			if (this.input.getValue().length === 0 && data === "?") {
 				this.state.mode = "help";
 				this.renderSoon();

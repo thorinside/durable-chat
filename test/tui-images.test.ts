@@ -70,7 +70,7 @@ test("paste is refused for a job target, because attachments go to main only", a
 	assert.match(render(), /images go to main only/);
 });
 
-test("Enter job activation preserves Main-only attachments and the draft through a refused job send and return to Main", async (t) => {
+test("Enter job activation preserves Main-only attachments through refused Enter and one-shot queue sends and return to Main", async (t) => {
 	const { runtime, dashboard, render, type } = await setup(t);
 	const started = await runtime.root.commit((tx) => createJobInCommit(tx, "attachment-target", runtime.model, runtime.jobExtensions, runtime.cwd, jobOptionsOf(runtime.config)), runtime.context);
 	await runtime.harness.abortTask(started.taskId, runtime.context);
@@ -84,6 +84,9 @@ test("Enter job activation preserves Main-only attachments and the draft through
 	assert.match(render(), /to job #\d+ › keep this image draft!/);
 	await type("\r");
 	assert.match(render(), /images go to main only/);
+	await dashboard.handleInput("\x1b[13;10u");
+	assert.match(render(), /images go to main only/);
+	assert.match(render(), /1 attached/);
 	assert.match(render(), /keep this image draft/);
 	const worker = (await findJobConversation(runtime.harness, Number(started.taskId), runtime.context))!;
 	assert.equal((await worker.entries({ order: "ascending" }, 100, undefined, runtime.context)).items.filter((entry) => entry.kind === "pi.user").length, 0);

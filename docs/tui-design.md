@@ -98,10 +98,12 @@ main it also shows the configured store, config path, and queued input count. No
 One editor with a visible target: `to main ›` or `to job #13 ›`.
 
 - `Enter` sends; `Shift-Enter` inserts a newline (`Ctrl-J` or `Alt-Enter` fallback); `Ctrl-T` toggles the target.
-- For the current target, a `(steer)` badge shows the selected ingress; `Alt-S` toggles it for main or a job.
+- For the current target, a `(steer)` badge shows that Enter steers a live job.
   Main defaults to `followUp`; live jobs default to `steer`, completed conversations to `followUp`.
-  Explicit job choices are remembered per job, independently of Main. The durable job status is checked
-  at admission; steering races/idle jobs reject without clearing the draft.
+  Command-Shift-Enter queues one follow-up from the composer when CSI-u/Kitty reports Super+Shift;
+  `/send <id> <text>` is the fallback for intercepted/legacy/modifyOtherKeys input. There is no sticky
+  mode override. The durable job status is checked at admission; steering races/idle jobs reject
+  without clearing the draft. Shift-Enter remains newline; Option-S remains text.
 - In job-brief mode (`n`), the target reads `new job ›`; `Enter` admits the job and pins it.
 - While an action is in flight, the composer remains usable for main; the status line shows the action.
 
@@ -117,7 +119,7 @@ Actions apply to the **selected target**, named in every confirmation.
 | `Esc` | Close overlay, stop scrolling, return target to main |
 | `n` | New job brief |
 | `Ctrl-T` | Toggle composer target main/selected job |
-| `Alt-S` | Toggle steer/follow-up for the current target |
+| `Command-Shift-Enter` | Composer: queue one follow-up if reported (CSI-u/Kitty); `/send <id> <text>` fallback |
 | `m` | Compact selected target (optional focus prompt) |
 | `R` | Reset selected target (optional handoff prompt, confirm) |
 | `c` | Cancel selected job (confirm) |
@@ -146,8 +148,8 @@ already the runtime's behavior.
 - **Message job**: default live-job steering uses the same atomic native admission and `JobLink`
   tracking as Main’s task tool, without waiting for the worker. `whenBusy: "steer", whenIdle: "reject"`
   admits only an active run and lands at a supported boundary, not by interrupting a tool. Explicit
-  `Alt-S` follow-up uses `whenBusy: "followUp"` and waits until the final boundary. Completed conversations
-  can still be continued with follow-up. Admission notices say queued, not delivered or completed.
+  `Command-Shift-Enter` one-shot follow-up uses `whenBusy: "followUp"` and waits until the final boundary.
+  Completed conversations can still be continued with follow-up. Admission notices say queued, not delivered or completed.
   Drafts/attachments clear only after successful admission; failed sends keep them editable.
 - **Compact**: `compactConversation`; wait through the compaction task and the placement, then show the
   summary entry id or the no-op reason. The TUI is blocked only for that action, not for input.
