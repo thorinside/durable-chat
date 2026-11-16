@@ -674,8 +674,8 @@ handoff({ target: "job",  brief: "Publish the release",      summary: "Notes rev
 
 ## Substrate MCP
 
-Job agents read MCP servers from `~/.pi/agent/mcp.json` (and `.pi/mcp.json` for project overrides), the
-same format pi uses. The config keys are:
+Job agents read a client-specific `mcpServers` JSON object from `~/.pi/agent/mcp.json` (and
+`.pi/mcp.json` for project overrides). The dchat configuration keys are:
 
 - `mcp.enabled` — `true` by default
 - `mcp.servers` — default `[substrate]`
@@ -684,6 +684,78 @@ same format pi uses. The config keys are:
 
 Environment equivalents: `DURABLE_MCP_ENABLED`, `DURABLE_MCP_SERVERS`, `DURABLE_MCP_TOOLS`,
 `DURABLE_MCP_CONFIG`. `--no-mcp` disables MCP for one run.
+
+### HTTP authentication and config compatibility
+
+Both of these server entries are supported. Values below are synthetic examples, not credentials.
+The headers form also works with dchat 1.0.0:
+
+```json
+{
+  "mcpServers": {
+    "substrate": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${SUBSTRATE_MCP_TOKEN}" }
+    }
+  }
+}
+```
+
+Alternatively, dchat accepts the bearer shorthand:
+
+```json
+{
+  "mcpServers": {
+    "substrate": {
+      "url": "https://mcp.example.com/mcp",
+      "auth": "bearer",
+      "bearerToken": "${SUBSTRATE_MCP_TOKEN}"
+    }
+  }
+}
+```
+
+Set `SUBSTRATE_MCP_TOKEN` in the launching process's environment, or use a literal token in your
+private MCP config (never commit it). Any explicit `Authorization` header wins over the shorthand,
+case-insensitively, even if its value is empty; other headers are preserved. Without that header,
+`auth: "bearer"` requires a string token that is non-empty after expansion and contains no whitespace.
+A `bearerToken` without `auth: "bearer"` does not enable authentication. Unsupported `auth` values
+fail before connection unless an explicit Authorization header is present.
+
+The supported subset is:
+
+- `url` selects Streamable HTTP; `headers` maps header names to string values. The bearer shorthand
+  adds `Authorization: Bearer <token>` only when no explicit Authorization header exists.
+- Otherwise, `command` selects stdio, with optional string-array `args`, string-map `env`, and `cwd`.
+  Stdio inherits the process environment; HTTP auth fields do not apply to it.
+- `enabled: false` skips a server; `timeout` is the request timeout in seconds (default 60).
+- String values in headers, bearer tokens, URLs, commands, args, env and cwd expand `${NAME}` from
+  the process environment (missing variables become empty strings); leading `~` expands to home.
+  Missing bearer variables therefore fail validation. Explicit header values keep their existing
+  expansion behavior, including empty values. No implicit `.env` loading, `$NAME` expansion or
+  `!command` execution is provided.
+- Project entries replace same-name global entries; they do not merge individual server fields.
+  Only load project configs you trust. Other client features such as OAuth/provider login,
+  exposure settings, or legacy HTTP+SSE are not implemented by this loader.
+
+`~/.config/mcp/mcp.json` is **not** automatically discovered. To use a config at that location:
+
+```sh
+dchat config set mcp.config ~/.config/mcp/mcp.json
+# Or, for a single launch:
+DURABLE_MCP_CONFIG="$HOME/.config/mcp/mcp.json" dchat
+```
+
+There is no universal global config filename/schema established by the MCP protocol. The
+[MCP transport specification (2025-11-25)](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+defines protocol transports, not a shared client config file. This loader is a documented dchat
+subset, **not** a claim of standard-config compliance. The inspected
+[Pi 1.5.0 config types](https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/coding-agent/src/core/mcp-servers.ts)
+and [config loader](https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/coding-agent/src/extensions/mcp/config.ts)
+use `headers` and an `auth: { "provider": "..." }` object, **not** `auth: "bearer"`/`bearerToken`.
+The latter is explicitly a dchat compatibility shorthand for existing user configs. dchat reuses
+`@earendil-works/pi-mcp` 1.5.0's HTTP transport header type, but does not import Pi coding-agent's
+incompatible file schema or claim its full validation/expansion semantics.
 
 The `substrate` server gets the three-tool gateway. Other servers expose selected tools directly (all
 tools up to 20 if no filter is set). If the server is missing, disabled, or unreachable, job agents get a

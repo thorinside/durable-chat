@@ -7,7 +7,7 @@ type JsonObject = Record<string, unknown>;
 import type { Schema } from "@earendil-works/pi-schema";
 import { int, map, obj, opt, str, unknown } from "@earendil-works/pi-schema";
 import { McpClient, StdioTransport, StreamableHttpTransport, toLlmContent } from "@earendil-works/pi-mcp";
-import type { CallToolResult, Tool as McpTool } from "@earendil-works/pi-mcp";
+import type { CallToolResult, Tool as McpTool, StreamableHttpTransportOptions } from "@earendil-works/pi-mcp";
 
 type McpServerEntry = {
 	type?: string;
@@ -16,7 +16,10 @@ type McpServerEntry = {
 	env?: Record<string, string>;
 	cwd?: string;
 	url?: string;
-	headers?: Record<string, string>;
+	headers?: StreamableHttpTransportOptions["headers"];
+	// dchat compatibility shorthand, not Pi 1.5.0's provider-auth object.
+	auth?: "bearer";
+	bearerToken?: string;
 	enabled?: boolean;
 	timeout?: number;
 	description?: string;
@@ -39,9 +42,14 @@ function readConfig(path: string, notes: string[]): Record<string, McpServerEntr
 	}
 	try {
 		const parsed = JSON.parse(readFileSync(path, "utf8")) as McpConfigFile;
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)
+			|| (parsed.mcpServers !== undefined && (parsed.mcpServers === null || typeof parsed.mcpServers !== "object" || Array.isArray(parsed.mcpServers)))) {
+			throw new Error("invalid MCP config shape");
+		}
 		return parsed.mcpServers ?? {};
-	} catch (error) {
-		notes.push(`could not read ${path}: ${error instanceof Error ? error.message : String(error)}`);
+	} catch {
+		// JSON parser errors can include source excerpts containing credentials.
+		notes.push(`could not read ${path}: invalid or unreadable MCP config`);
 		return {};
 	}
 }
@@ -59,12 +67,42 @@ export function readMcpServers(configPath: string | undefined, notes: string[]):
 	return servers;
 }
 
+function httpHeaders(entry: McpServerEntry): Record<string, string> {
+	if (entry.headers !== undefined && (entry.headers === null || typeof entry.headers !== "object" || Array.isArray(entry.headers)
+		|| Object.values(entry.headers).some((value) => typeof value !== "string"))) {
+		throw new Error("MCP headers must map names to strings");
+	}
+	const headers = Object.fromEntries(Object.entries(entry.headers ?? {}).map(([key, value]) => [key, expand(value)]));
+	// Header names are case-insensitive. Explicit headers win, even an empty Authorization.
+	if (!Object.keys(headers).some((key) => key.toLowerCase() === "authorization")) {
+		if (entry.auth !== undefined && entry.auth !== "bearer") throw new Error('MCP auth must be "bearer"; use headers for other authorization');
+		if (entry.auth === "bearer") {
+			if (typeof entry.bearerToken !== "string") throw new Error("MCP bearer auth requires a non-empty bearerToken");
+			const token = expand(entry.bearerToken);
+			if (token.length === 0 || /\s/.test(token)) throw new Error("MCP bearer auth requires a non-empty bearerToken without whitespace");
+			headers.Authorization = `Bearer ${token}`;
+		}
+	}
+	try {
+		// Validate without exposing header values in a platform-specific TypeError.
+		new Headers(headers);
+	} catch {
+		throw new Error("MCP headers contain an invalid name or value");
+	}
+	return headers;
+}
+
 async function connect(name: string, entry: McpServerEntry, notes: string[]): Promise<McpClient | undefined> {
+	if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+		notes.push(`MCP server ${name} must be an object`);
+		return undefined;
+	}
 	const requestTimeoutMs = (entry.timeout ?? 60) * 1000;
 	const client = new McpClient({ name: "durable-chat", version: "0.1.0", requestTimeoutMs });
+	let headers: Record<string, string> = {};
 	try {
 		if (entry.url !== undefined) {
-			const headers = Object.fromEntries(Object.entries(entry.headers ?? {}).map(([key, value]) => [key, expand(value)]));
+			headers = httpHeaders(entry);
 			await client.connect(new StreamableHttpTransport({ url: expand(entry.url), headers }));
 		} else if (entry.command !== undefined) {
 			const expandedCwd = entry.cwd === undefined ? undefined : expand(entry.cwd);
@@ -87,7 +125,13 @@ async function connect(name: string, entry: McpServerEntry, notes: string[]): Pr
 		}
 		return client;
 	} catch (error) {
-		notes.push(`MCP server ${name} failed to connect: ${error instanceof Error ? error.message : String(error)}`);
+		let message = errorText(error);
+		// A transport/server error may echo request headers; never include those credentials in notes.
+		const bearerValues = Object.entries(headers).filter(([key]) => key.toLowerCase() === "authorization")
+			.map(([, value]) => /^Bearer\s+(.+)$/i.exec(value)?.[1] ?? "");
+		const sensitive = [...Object.values(headers), ...bearerValues, ...(typeof entry.bearerToken === "string" ? [entry.bearerToken, expand(entry.bearerToken)] : [])];
+		for (const value of sensitive.filter(Boolean).sort((a, b) => b.length - a.length)) message = message.replaceAll(value, "[redacted]");
+		notes.push(`MCP server ${name} failed to connect: ${message}`);
 		await client.close().catch(() => undefined);
 		return undefined;
 	}
@@ -204,7 +248,7 @@ export async function connectMcp(options: {
 			extensions.push(unavailableExtension(extensionName, name, "not configured"));
 			continue;
 		}
-		if (entry.enabled === false) {
+		if (entry !== null && entry.enabled === false) {
 			notes.push(`MCP server ${name} is disabled`);
 			extensions.push(unavailableExtension(extensionName, name, "disabled"));
 			continue;
