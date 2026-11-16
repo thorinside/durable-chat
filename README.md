@@ -290,6 +290,19 @@ the summary placement. A short conversation, or one with no selectable old prefi
 The default interface is a three-pane dashboard: jobs on the left, the selected conversation in the
 middle, and live context on the right. The composer sends to `main` by default; open a job to target it.
 
+**Alt-C** toggles the context pane from any dashboard focus; `/context [on|off|toggle]` does the same
+from the composer. The choice is saved as `contextPanel: true|false` using the same targeted YAML editor
+as `dchat config set contextPanel false`: it edits the active config (folder-local if present, otherwise
+`$XDG_CONFIG_HOME/durable-chat/config.yaml` or `~/.config/durable-chat/config.yaml`; `.yml` discovery is
+also supported). With `--config` or `DURABLE_CHAT_CONFIG`, only that standalone file is edited. Local
+values override global values; an explicit file stands alone. No conversation state or credential files
+are touched. If saving fails, the preference stays unchanged and an error is shown.
+
+Enabled (the default) means “show when there is room”: at least **140 terminal columns**, with at least
+**80 transcript columns** and **26 context columns** after the jobs pane and separators. Manual pane
+resizing obeys those limits too. Narrow-window hiding never changes the saved choice; an explicitly
+hidden pane stays hidden across resizing and restarts. `0` resets widths only, not visibility.
+
 The mouse wheel, Magic Mouse and trackpad scroll the pane under the pointer, keeping keyboard focus,
 the composer draft and the selected job unchanged. Pane headings stay fixed; keyboard job navigation
 brings the selection back into view. Alt+wheel scrolls faster.
@@ -338,6 +351,7 @@ Folders outside home remain absolute. Allow program-controlled titles in your te
 | `Tab` / `Shift-Tab` | cycle composer → jobs → transcript |
 | `Ctrl-T` | switch composer target main ↔ selected job |
 | `Ctrl-N` | new job brief |
+| `Alt-C` | toggle context pane; saved in the active config |
 | `Alt-S` | steer vs follow-up for the current target (main or job) |
 | `Ctrl-V` | paste an image into the composer (main only) |
 | `Enter` | send, open the selected job, or confirm |
@@ -349,7 +363,7 @@ Folders outside home remain absolute. Allow program-controlled titles in your te
 | `s / t / f / y` | send-to · expand tools · show finished · copy |
 | `/` | start a slash command in the composer; filter jobs when focus is on jobs/transcript |
 | `[` / `]` | shrink / grow the jobs pane |
-| `{` / `}` | shrink / grow the context pane (shows it on narrow terminals) |
+| `{` / `}` | shrink / grow the context pane when there is room (does not enable a hidden pane) |
 | `0` | reset pane widths |
 | `i` | inspector (config, MCP notes, usage); `e` edits the config |
 | `a` | abort the main run (jobs survive) |
@@ -462,6 +476,7 @@ Inside the plain chat or TUI composer:
 /model [id]             pick the session-wide model, across configured providers
 /provider [name]        list configured providers, or make one active for this session
 /thinking [level]       session thinking level for main and jobs; the config file decides the next run
+/context [on|off|toggle] TUI only: show/hide context when there is room; saved in the active config
 /image <path>           attach an image to the next message to main
 /reboot                 archive all app state and start a fresh database (confirmation required)
 /rollback [path]        select saved state, archive current state, restore a copy, and relaunch
