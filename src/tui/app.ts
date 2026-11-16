@@ -1157,10 +1157,10 @@ export class Dashboard implements Component {
 			if (index > 0) content.push("");
 			const selected = row.id === this.state.selectedJobId;
 			const marker = selected ? fg("▸", ACCENT) : " ";
-			const id = `#${row.id}`.padEnd(6);
+			const id = `#${String(row.id).padEnd(7)}`;
 			const state = truncateToWidth(compactJobStatus(row.status), 9).padEnd(9);
 			const age = row.startedAt === undefined ? "—" : compactDuration(Math.max(0, (row.endedAt ?? this.now()) - row.startedAt));
-			const head = `${marker} ${selected ? bold(id) : id}${statusText(state)} ${dim(age.padStart(3))}`;
+			const head = `${marker} ${selected ? bold(id) : id} ${statusText(state)} ${dim(age.padStart(3))}`;
 			content.push(truncateToWidth(head, width, "", true));
 			const briefWidth = Math.max(4, width - 3);
 			const origin = row.fork === undefined ? "" : `↳ ${row.fork.jobId === undefined ? "main" : `#${row.fork.jobId}`} · `;

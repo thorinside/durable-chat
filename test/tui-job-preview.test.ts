@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { EntryRecord, UserInput } from "@earendil-works/pi-durable";
-import { isKittyProtocolActive, matchesKey, setKittyProtocolActive, stripTerminalSequences, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import { isKittyProtocolActive, matchesKey, setKittyProtocolActive, stripTerminalSequences, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { openRuntime, type AppRuntime } from "../src/harness.ts";
 import { createJobInCommit, findJobConversation, jobOptionsOf } from "../src/jobs.ts";
 import { JOB_KIND } from "../src/tasks.ts";
@@ -62,12 +62,13 @@ function conversation(id: number, initial: string) {
 	};
 }
 
-async function fixture(t: TestContext, count = 2) {
+async function fixture(t: TestContext, count = 2, options: { ids?: number[]; handoff?: boolean } = {}) {
 	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 1000 });
 	const main = conversation(100, "MAIN-HISTORY");
 	const jobs = [conversation(101, "JOB-ONE-HISTORY"), conversation(102, "JOB-TWO-HISTORY")];
-	const available = new Map(jobs.map((job, index) => [index + 1, job.id]));
-	const records = jobs.slice(0, count).map((job, index) => ({ id: index + 1, kind: JOB_KIND, input: { brief: `brief-${index + 1}` }, state: { status: "terminal", outcome: { status: "completed", result: { conversationId: job.id } } } }));
+	const jobId = (index: number) => options.ids?.[index] ?? index + 1;
+	const available = new Map(jobs.map((job, index) => [jobId(index), job.id]));
+	const records = jobs.slice(0, count).map((job, index) => ({ id: jobId(index), kind: JOB_KIND, input: { brief: `brief-${index + 1}` }, state: { status: "terminal", outcome: { status: "completed", result: { conversationId: job.id, ...(options.handoff ? { status: "handed_off", handoff: { target: "main" } } : {}) } } } }));
 	const links = new Map<number, { steering?: { requestId: string; message: string } }>();
 	let graphListener: (call: unknown) => void = () => {};
 	const renders = new Set<() => void>();
@@ -113,6 +114,31 @@ async function fixture(t: TestContext, count = 2) {
 		async key(key: string) { await dashboard.handleInput(key); },
 		refresh(tasks: Record<string, unknown> = {}) { graphListener({ kind: "value", value: { tasks } }); t.mock.timers.tick(120); },
 	};
+}
+
+// Selection tests use tiny IDs, so they cannot detect the ID running into its status.
+for (const id of [10441, 104411, 1044111, 10441111, Number.MAX_SAFE_INTEGER]) {
+	test(`${String(id).length}-digit job IDs reserve seven numeric cells and remain separated from status`, async (t) => {
+		const app = await fixture(t, 2, { ids: [id, id - 1], handoff: true });
+		await app.key("\t"); // Exercise the selected (styled) ID as well as the unselected ID below.
+		for (const selected of [true, false]) {
+			if (!selected) await app.key("\x1b[B");
+			for (const [index, width] of [64, 80, 160, 64].entries()) {
+				if (index === 3) {
+					// Shrink to the supported 22-cell minimum, leaving overwidth IDs intact.
+					for (let step = 0; step < 5; step++) await app.key("[");
+				}
+				const frame = app.dashboard.render(width).map(stripTerminalSequences);
+				const head = frame.map((line) => line.split("│")[0]!).find((line) => line.includes(`#${id}`))!;
+				const boundary = head.match(new RegExp(`#${id}( +)(\\S+)`));
+				assert.ok(boundary, "the full ID and status must be separated, even for IDs wider than seven digits");
+				assert.equal(boundary[2], "handoff".slice(0, boundary[2]!.length), "narrow panes may clip status, but not the ID or separator");
+				assert.equal(boundary[1]!.length, Math.max(0, 7 - String(id).length) + 1);
+				assert.equal(head.indexOf(boundary[2]!) - head.indexOf("#"), 1 + Math.max(7, String(id).length) + 1);
+				assert.ok(frame.every((line) => visibleWidth(line) <= width));
+			}
+		}
+	});
 }
 
 const navigationKeys = [
