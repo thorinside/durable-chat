@@ -96,7 +96,7 @@ main it also shows the configured store, config path, and queued input count. No
 
 One editor with a visible target: `to main ›` or `to job #13 ›`.
 
-- `Enter` sends; `Ctrl-J` inserts a newline; `Ctrl-T` toggles the target.
+- `Enter` sends; `Shift-Enter` inserts a newline (`Ctrl-J` or `Alt-Enter` fallback); `Ctrl-T` toggles the target.
 - For the current target, a `(steer)` badge shows the selected ingress; `Alt-S` toggles it for main or a job.
   Default `followUp`, because it is the safe choice while the coordinator is answering.
 - In job-brief mode (`n`), the target reads `new job ›`; `Enter` admits the job and pins it.
@@ -260,7 +260,7 @@ Implemented choices:
 - A job row uses two lines (status/id/age, then brief) so the brief stays readable in a narrow pane.
 - The TUI calls `resume()` at startup, so pending jobs and interrupted phases from a previous process
   continue without requiring another command.
-- The composer is single-line; multi-line briefs are not supported in the TUI yet.
+- The composer uses the toolkit multiline editor: drafts grow and scroll, and bracketed paste preserves normalized line breaks. Large pastes fold into markers that expand on submission.
 - Mouse input is disabled in v1; every action has a keyboard path.
 - A first `Ctrl-C` stops a wait, clears a prompt, or closes an overlay. A second consecutive press within
   1.5 seconds requests quit (with confirmation while work is live). Other input resets the sequence.

@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { Input, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { getNativeClipboard } from "@earendil-works/pi-tui";
 import { withCancel } from "@earendil-works/chord/context";
@@ -33,6 +33,7 @@ import { overlayDialog } from "./dialog.ts";
 import { JOB_KIND } from "../tasks.ts";
 import { TranscriptSelection } from "./selection.ts";
 import { openBrowser } from "./browser.ts";
+import { Composer, isComposerNewline } from "./composer.ts";
 
 const FLASH_MS = 5000;
 const QUIT_REPEAT_MS = 1500;
@@ -95,11 +96,8 @@ export class Dashboard implements Component {
 	private readonly onEditConfig: (() => Promise<string>) | undefined;
 	private readonly paster: ImagePaster;
 	private attachments: ImageAttachment[] = [];
-	private readonly input = new Input({
-		prompt: "",
-		placeholder: "type a message or Ctrl-N for a job",
-		placeholderStyle: (text) => fg(text, BORDER, { dim: true }),
-	});
+	private readonly input: Composer;
+	private composerHeight = 3;
 	private readonly state: AppState = {
 		focus: "composer",
 		target: { kind: "main" },
@@ -157,6 +155,7 @@ export class Dashboard implements Component {
 		);
 		this.runtime = options.runtime;
 		this.rowsOf = options.rows;
+		this.input = new Composer(options.rows, options.requestRender);
 		this.requestRender = options.requestRender;
 		this.onQuit = options.onQuit;
 		this.onReboot = options.onReboot;
@@ -582,8 +581,8 @@ export class Dashboard implements Component {
 		await this.runAction(`sending to ${targetLabel(target)}`, async (context) => {
 			if (target.kind === "main") {
 				const content: UserInput = attachments.length === 0
-					? text
-					: [...(text.length > 0 ? [{ type: "text" as const, text }] : []), ...attachments.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))];
+					? value
+					: [...(text.length > 0 ? [{ type: "text" as const, text: value }] : []), ...attachments.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))];
 				await this.runtime.root.submit({
 					type: "input",
 					content,
@@ -594,7 +593,8 @@ export class Dashboard implements Component {
 			}
 			const conversation = await findJobConversation(this.runtime.harness, target.id, context);
 			if (conversation === undefined) throw new Error(`job #${target.id} has no conversation`);
-			await conversation.submit(jobInputDraft(text, this.state.steer), context);
+			// Validate job input as before, but retain the composed whitespace verbatim.
+			await conversation.submit({ ...jobInputDraft(value, this.state.steer), content: value }, context);
 			this.flash(this.state.steer ? `steered job #${target.id}` : `sent to job #${target.id}`);
 		});
 	}
@@ -925,7 +925,7 @@ export class Dashboard implements Component {
 	}
 
 	private bodyHeight(): number {
-		return Math.max(3, Math.max(MIN_ROWS, Math.round(this.rowsOf())) - CHROME_ROWS);
+		return Math.max(3, Math.max(MIN_ROWS, Math.round(this.rowsOf())) - CHROME_ROWS - (this.composerHeight - 3));
 	}
 
 	/** Shared by rendering, transcript wrapping and pointer hit testing after pane resizes. */
@@ -991,6 +991,8 @@ export class Dashboard implements Component {
 	render(width: number): string[] {
 		this.lastWidth = width;
 		const height = Math.max(MIN_ROWS, Math.round(this.rowsOf()));
+		const composer = this.renderComposer(width);
+		this.composerHeight = composer.length;
 		const bodyHeight = this.bodyHeight();
 		if (this.state.mode !== "chat") this.selection.update();
 		let body: string[];
@@ -1013,7 +1015,7 @@ export class Dashboard implements Component {
 			...padLines(body, bodyHeight, width),
 			" ".repeat(width),
 			this.renderStatus(width),
-			...this.renderComposer(width),
+			...composer,
 			this.renderHint(width),
 		].slice(0, height);
 		if (this.state.mode === "confirmRollback") return overlayDialog(frame, width, "Rollback all state?",
@@ -1208,17 +1210,19 @@ export class Dashboard implements Component {
 	}
 
 	private renderComposer(width: number): string[] {
-		const prefix = ` ${this.composerPrefix()}`;
+		const prefix = truncateToWidth(` ${this.composerPrefix()}`, Math.max(0, width - 3), "");
 		const active = this.state.focus === "composer"
 			&& this.state.mode !== "help"
 			&& this.state.mode !== "inspector"
 			&& !this.state.mode.startsWith("confirm");
 		this.input.focused = active;
 		const inner = Math.max(1, width - visibleWidth(prefix) - 1);
-		const rendered = this.input.render(inner)[0] ?? "";
-		const line = `${fg(prefix, active ? ACCENT : MUTED)}${rendered}`;
-		const spacer = backgroundLine("", width, COMPOSER_BG);
-		return [spacer, backgroundLine(line, width, COMPOSER_BG), spacer];
+		const maxContentRows = Math.max(1, Math.max(MIN_ROWS, Math.round(this.rowsOf())) - CHROME_ROWS - PANE_HEADING_ROWS);
+		const rendered = this.input.render(inner, maxContentRows);
+		return rendered.map((line, index) => {
+			const label = index === 1 ? fg(prefix, active ? ACCENT : MUTED) : " ".repeat(visibleWidth(prefix));
+			return backgroundLine(`${label}${line}`, width, COMPOSER_BG);
+		});
 	}
 
 	private renderHint(width: number): string {
@@ -1233,7 +1237,7 @@ export class Dashboard implements Component {
 		else if (this.state.mode === "confirmReboot") hint = [shortcut("Y", "reboot"), shortcut("ENTER / N / ESC", "cancel")].join(separator);
 		else if (this.state.mode === "confirmCancel" || this.state.mode === "confirmReset" || this.state.mode === "confirmQuit" || this.state.mode === "confirmAbortMain") hint = [shortcut("Y / ENTER", "confirm"), shortcut("N / ESC", "cancel")].join(separator);
 		else if (this.actionLabel !== undefined) hint = shortcut("CTRL-C", "stop waiting (work stays durable)");
-		else if (this.state.focus === "composer") hint = [shortcut("ENTER", "send"), shortcut("CTRL-C ×2", "quit"), shortcut("TAB", "jobs"), shortcut("CTRL-T", "target"), shortcut("CTRL-N", "new job"), shortcut("CTRL-V", "paste image"), ...(this.attachments.length === 0 ? [] : [fg(`${this.attachments.length} attached`, YELLOW)])].join(separator);
+		else if (this.state.focus === "composer") hint = [shortcut("ENTER", "send"), shortcut("SHIFT-ENTER", "newline"), shortcut("CTRL-C ×2", "quit"), shortcut("TAB", "jobs"), shortcut("CTRL-T", "target"), shortcut("CTRL-N", "new job"), shortcut("CTRL-V", "paste image"), ...(this.attachments.length === 0 ? [] : [fg(`${this.attachments.length} attached`, YELLOW)])].join(separator);
 		else if (this.state.focus === "jobs") hint = [shortcut("J/K", "select"), shortcut("ENTER", "open"), shortcut("N", "new"), shortcut("C", "cancel"), shortcut("M/SHIFT-R", "compact/reset"), shortcut("I", "info"), shortcut("TAB", "focus")].join(separator);
 		else hint = [shortcut("J/K", "scroll"), shortcut("G/SHIFT-G", "oldest/newest"), shortcut("T", "tools"), shortcut("S", "send"), shortcut("C", "cancel"), shortcut("ESC", "main"), shortcut("TAB", "focus")].join(separator);
 		if (this.scroll > 0 && this.state.focus === "transcript") hint += dim(` · ↑${this.scroll}`);
@@ -1245,6 +1249,7 @@ export class Dashboard implements Component {
 			["TAB / SHIFT-TAB", "cycle composer, jobs, transcript"],
 			["CTRL-T", "target main ↔ selected job"],
 			["CTRL-N", "new job brief"],
+			["SHIFT-ENTER", "insert a newline (Ctrl-J or Alt-Enter fallback); Enter sends"],
 			["ALT-S", "steer vs follow-up for the target"],
 			["CTRL-V", "paste an image into the composer (main only)"],
 			["ENTER", "send, open job, or confirm prompt"],
@@ -1412,6 +1417,11 @@ export class Dashboard implements Component {
 		if (this.state.mode === "confirmCancel" || this.state.mode === "confirmReset" || this.state.mode === "confirmQuit" || this.state.mode === "confirmAbortMain") {
 			if (data === "y" || data === "Y" || matchesKey(data, "enter")) this.confirm();
 			else if (data === "n" || data === "N" || matchesKey(data, "escape")) this.cancelPrompt();
+			return;
+		}
+		if ((this.state.focus === "composer" || this.state.mode !== "chat") && isComposerNewline(data)) {
+			this.input.handleInput("\n");
+			this.renderSoon();
 			return;
 		}
 		if (this.state.mode === "model") {
