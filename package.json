@@ -1,6 +1,6 @@
 {
   "name": "durable-chat",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Terminal coordinator for durable pi agents with a TUI dashboard, background jobs, and configurable local inference",
   "main": "dist/cli.js",
   "scripts": {
