@@ -288,3 +288,48 @@ test("config CLI can create a local override directly but rejects conflicting ex
 		assert.equal(readFileSync(globalPath, "utf8"), "maxTurns: 11\n");
 	});
 });
+
+test("contextPanel is an editable boolean defaulting to enabled and invalid writes leave the file intact", () => {
+	const dir = tempDir();
+	const configPath = join(dir, "config.yaml");
+	try {
+		writeFileSync(configPath, "# retain comments\nprovider: faux\n");
+		assert.equal(resolveConfig({ configPath }, EMPTY_ENV).contextPanel, true);
+		setConfigValue(configPath, "contextPanel", "false");
+		assert.equal(resolveConfig({ configPath }, EMPTY_ENV).contextPanel, false);
+		const before = readFileSync(configPath, "utf8");
+		assert.throws(() => setConfigValue(configPath, "contextPanel", "hidden"), /contextPanel must be true or false/);
+		assert.equal(readFileSync(configPath, "utf8"), before);
+		unsetConfigValue(configPath, "contextPanel");
+		assert.equal(resolveConfig({ configPath }, EMPTY_ENV).contextPanel, true);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("context visibility inherits global settings but edits the local or explicit highest-precedence file", () => {
+	withWorkspace(({ globalPath, localPath, env }) => {
+		const globalText = "# global choice\ncontextPanel: false\n";
+		writeFileSync(globalPath, globalText);
+		const global = resolveConfig({}, env);
+		assert.equal(global.contextPanel, false);
+		assert.equal(global.configPath, globalPath);
+		writeFileSync(localPath, "# project inherits the choice\nmaxTurns: 17\n");
+		const inherited = resolveConfig({}, env);
+		assert.equal(inherited.contextPanel, false);
+		setConfigValue(inherited.configPath, "contextPanel", "true");
+		assert.equal(resolveConfig({}, env).contextPanel, true);
+		assert.equal(readFileSync(globalPath, "utf8"), globalText);
+		const localText = readFileSync(localPath, "utf8");
+		const explicitPath = join(process.cwd(), "standalone.yaml");
+		writeFileSync(explicitPath, "# independent config\nprovider: faux\n");
+		for (const config of [resolveConfig({ configPath: explicitPath }, env), resolveConfig({}, { ...env, DURABLE_CHAT_CONFIG: explicitPath })]) {
+			assert.equal(config.contextPanel, true, "standalone files do not inherit a global choice");
+			assert.equal(config.configPath, explicitPath);
+		}
+		setConfigValue(resolveConfig({ configPath: explicitPath }, env).configPath, "contextPanel", "false");
+		assert.equal(resolveConfig({ configPath: explicitPath }, env).contextPanel, false);
+		assert.equal(readFileSync(globalPath, "utf8"), globalText);
+		assert.equal(readFileSync(localPath, "utf8"), localText);
+	});
+});
