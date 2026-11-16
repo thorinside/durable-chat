@@ -1,6 +1,6 @@
 import type { Context } from "@earendil-works/chord/context";
 import type { Conversation, ConversationView, ConversationWatch, Cursor, EntryRecord, UsageState } from "@earendil-works/pi-durable";
-import { formatEntry, formatLive, type LiveView } from "./format.ts";
+import { formatEntryLines, formatLiveLines, transcriptLine, type TranscriptLine, type LiveView } from "./format.ts";
 import { estimateContextTokens } from "../context-usage.ts";
 
 const INITIAL_ENTRIES = 80;
@@ -27,7 +27,7 @@ export class Transcript {
 	private cursor: Cursor | undefined;
 	private watch: ConversationWatch | undefined;
 	private version = 0;
-	private cache: { version: number; width: number; tools: boolean; lines: string[] } | undefined;
+	private cache: { version: number; width: number; tools: boolean; lines: TranscriptLine[] } | undefined;
 	onUpdate: () => void = () => undefined;
 
 	constructor(conversation: Conversation) {
@@ -117,24 +117,24 @@ export class Transcript {
 	}
 
 	/** Committed transcript lines for one width. */
-	lines(width: number, toolsExpanded: boolean): string[] {
+	lines(width: number, toolsExpanded: boolean): TranscriptLine[] {
 		const cached = this.cache;
 		if (cached !== undefined && cached.version === this.version && cached.width === width && cached.tools === toolsExpanded) {
 			return cached.lines;
 		}
-		const lines: string[] = [];
+		const lines: TranscriptLine[] = [];
 		for (const entry of this.entries) {
-			const formatted = formatEntry(entry, { width, toolsExpanded });
+			const formatted = formatEntryLines(entry, { width, toolsExpanded });
 			if (formatted.length > 0) {
-				lines.push(...formatted, "");
+				lines.push(...formatted, transcriptLine(""));
 			}
 		}
 		this.cache = { version: this.version, width, tools: toolsExpanded, lines };
 		return lines;
 	}
 
-	liveLines(width: number): string[] {
-		return formatLive(this.live, width);
+	liveLines(width: number): TranscriptLine[] {
+		return formatLiveLines(this.live, width);
 	}
 
 	get modelCount(): number {

@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { isAbsolute, relative, sep } from "node:path";
-import { backgroundAnsi, indexedColor, Markdown, styleText, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { backgroundAnsi, indexedColor, Markdown, styleText, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { MarkdownTheme, TextAttributes } from "@earendil-works/pi-tui";
 import type { EntryRecord, UsageState } from "@earendil-works/pi-durable";
 import { formatDuration } from "../format.ts";
@@ -90,6 +90,9 @@ function blockText(content: unknown): string {
 }
 
 const TRANSCRIPT_MARKDOWN_THEME: MarkdownTheme = {
+	// The transcript already has a speaker gutter; don't add the toolkit's two
+	// decorative code columns on top of source indentation (or copy them out).
+	codeBlockIndent: "",
 	heading: (text) => fg(text, TEXT),
 	link: (text) => fg(text, ACCENT),
 	linkUrl: dim,
@@ -106,13 +109,22 @@ const TRANSCRIPT_MARKDOWN_THEME: MarkdownTheme = {
 	underline: (text) => styleText(text, { underline: true }, MODE),
 };
 
-function prefixLines(text: string, prefix: string, width: number, color: number): string[] {
+/** Copy bounds are terminal columns, recorded before pane padding is added. */
+export type TranscriptLine = { text: string; copyStart: number; copyEnd: number };
+
+export function transcriptLine(text: string, copyStart = 0): TranscriptLine {
+	return { text, copyStart, copyEnd: visibleWidth(stripTerminalSequences(text).replace(/ +$/u, "")) };
+}
+
+function prefixLines(text: string, prefix: string, width: number, color: number): TranscriptLine[] {
 	const inner = Math.max(1, width - visibleWidth(prefix));
 	const markdown = new Markdown(text, 0, 0, TRANSCRIPT_MARKDOWN_THEME, { color: (value) => fg(value, color) }, { renderLatex: false });
 	const rendered = markdown.render(inner);
 	const lines = rendered.length === 0 ? [""] : rendered;
 	const pad = " ".repeat(visibleWidth(prefix));
-	return lines.map((line, index) => fg(index === 0 ? prefix : pad, color) + line);
+	return lines.map((line, index) => transcriptLine(fg(index === 0 ? prefix : pad, color) + line,
+		// Keep visible speaker labels, but not the blank continuation gutter.
+		index === 0 && prefix.trim() !== "" ? prefix.length - prefix.trimStart().length : visibleWidth(prefix)));
 }
 
 function rule(label: string, width: number): string {
@@ -120,47 +132,51 @@ function rule(label: string, width: number): string {
 	return fg(truncateToWidth(text, width, ""), BORDER);
 }
 
-function ruleWithText(label: string, body: string, width: number, color = MUTED): string[] {
-	const lines = [rule(label, width)];
+function ruleWithText(label: string, body: string, width: number, color = MUTED): TranscriptLine[] {
+	const lines = [transcriptLine(rule(label, width))];
 	if (body.trim().length > 0) lines.push(...prefixLines(body.trimEnd(), "  ", width, color));
 	return lines;
 }
 
-function toolResultLines(message: Message, width: number, expanded: boolean): string[] {
+function toolResultLines(message: Message, width: number, expanded: boolean): TranscriptLine[] {
 	const name = message.toolName ?? "tool";
 	const mark = message.isError === true ? "✗" : "✓";
 	const ms = message.durationMs === undefined ? "" : ` · ${formatDuration(message.durationMs)}`;
 	const body = blockText(message.content).replace(/\s+/g, " ").trim();
 	const summary = body.length > 140 ? `${body.slice(0, 139)}…` : body;
 	const head = fg(`      ↳ ${mark} ${name}${ms}`, message.isError === true ? RED : GREEN);
-	const lines = [truncateToWidth(`${head}${summary.length === 0 ? "" : dim(`  ${summary}`)}`, width, "")];
+	const lines = [transcriptLine(truncateToWidth(`${head}${summary.length === 0 ? "" : dim(`  ${summary}`)}`, width, ""), 6)];
 	if (expanded) {
 		const indent = " ".repeat(Math.min(10, width - 1));
 		const full = blockText(message.content).trimEnd();
 		const shown = full.split("\n").slice(0, 12);
 		for (const line of shown) {
 			for (const wrapped of wrapTextWithAnsi(line, width - indent.length)) {
-				lines.push(dim(`${indent}${wrapped}`));
+				lines.push(transcriptLine(dim(`${indent}${wrapped}`), indent.length));
 			}
 		}
-		if (full.split("\n").length > shown.length) lines.push(dim(`${indent}…`));
+		if (full.split("\n").length > shown.length) lines.push(transcriptLine(dim(`${indent}…`), indent.length));
 	}
 	return lines;
 }
 
 /** One immutable transcript entry to display lines. */
 export function formatEntry(entry: EntryRecord, options: EntryFormatOptions): string[] {
+	return formatEntryLines(entry, options).map((line) => line.text);
+}
+
+export function formatEntryLines(entry: EntryRecord, options: EntryFormatOptions): TranscriptLine[] {
 	const width = Math.max(8, options.width);
 	const messages = (entry.model ?? []) as readonly Message[];
 	if (entry.kind === "pi.user") {
 		return messages.flatMap((message) => prefixLines(blockText(message.content), " you  ", width, ACCENT));
 	}
 	if (entry.kind === "pi.assistant") {
-		const lines: string[] = [];
+		const lines: TranscriptLine[] = [];
 		for (const message of messages) {
 			const text = blockText(message.content).trimEnd();
 			if (text.length > 0) lines.push(...prefixLines(text, " ai   ", width, GREEN));
-			if (message.stopReason === "aborted" && text.length === 0) lines.push(fg("      [aborted attempt]", MUTED, { dim: true }));
+			if (message.stopReason === "aborted" && text.length === 0) lines.push(transcriptLine(fg("      [aborted attempt]", MUTED, { dim: true }), 6));
 		}
 		return lines;
 	}
@@ -176,7 +192,7 @@ export function formatEntry(entry: EntryRecord, options: EntryFormatOptions): st
 		return ruleWithText("compacted context", options.toolsExpanded ? summary : "summary retained in history", width, MUTED);
 	}
 	if (entry.kind === "pi.system") {
-		return options.showSystem === true ? [dim(truncateToWidth("── system prompt updated", width, ""))] : [];
+		return options.showSystem === true ? [transcriptLine(dim(truncateToWidth("── system prompt updated", width, "")))] : [];
 	}
 	if (entry.kind === "app.job-handoff") {
 		const data = entry.data as { fromJob?: unknown } | undefined;
@@ -187,11 +203,11 @@ export function formatEntry(entry: EntryRecord, options: EntryFormatOptions): st
 		const data = entry.data as { taskId?: unknown; phase?: unknown } | undefined;
 		const body = messages.map((message) => blockText(message.content)).join(" ").replace(/^\[host\]\s*/, "").trim();
 		const lines = ruleWithText(`host · job #${data?.taskId ?? "?"} ${data?.phase ?? "notice"}`, body, width, MUTED);
-		if (body.length > 0) lines.splice(1, 0, "");
+		if (body.length > 0) lines.splice(1, 0, transcriptLine(""));
 		return lines;
 	}
 	if (entry.kind.startsWith("app.")) return [];
-	return options.showSystem === true ? [dim(truncateToWidth(`── ${entry.kind}`, width, ""))] : [];
+	return options.showSystem === true ? [transcriptLine(dim(truncateToWidth(`── ${entry.kind}`, width, "")))] : [];
 }
 
 export type LiveView = {
@@ -202,19 +218,23 @@ export type LiveView = {
 
 /** Streaming partial answer and tool slots below the committed transcript. */
 export function formatLive(live: LiveView | undefined, width: number): string[] {
+	return formatLiveLines(live, width).map((line) => line.text);
+}
+
+export function formatLiveLines(live: LiveView | undefined, width: number): TranscriptLine[] {
 	if (live === undefined) return [];
-	const lines: string[] = [];
+	const lines: TranscriptLine[] = [];
 	const text = blockText(live.generation?.message?.content).trimEnd();
 	if (text.length > 0) lines.push(...prefixLines(text, " ai   ", width, GREEN));
 	// Completed slots already have committed tool-result entries; only show current work.
 	const active = (live.tools ?? []).filter((slot) => slot.status !== "done").slice(0, 8);
 	for (const slot of active) {
 		const status = slot.status ?? "pending";
-		lines.push(fg(`  ${status === "running" ? "▸" : "·"} ${slot.name ?? "tool"} ${status}`, YELLOW));
+		lines.push(transcriptLine(fg(`  ${status === "running" ? "▸" : "·"} ${slot.name ?? "tool"} ${status}`, YELLOW), 2));
 	}
 	if (live.runFailure !== undefined) {
 		const detail = live.runFailure.detail === undefined ? "" : `: ${live.runFailure.detail}`;
-		lines.push(fg(`  run failed: ${live.runFailure.reason ?? "unknown"}${detail}`, RED));
+		lines.push(transcriptLine(fg(`  run failed: ${live.runFailure.reason ?? "unknown"}${detail}`, RED), 2));
 	}
 	return lines;
 }

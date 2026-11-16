@@ -1,8 +1,9 @@
+import type { CopyResult, CopyText } from "./clipboard.ts";
 import { getOsc8LinkAtColumn, sliceByColumn, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 
 type Point = { row: number; col: number };
-type Frame = { x: number; y: number; width: number; lines: string[]; source?: object };
+type Frame = { x: number; y: number; width: number; lines: string[]; copyBounds: { copyStart: number; copyEnd: number }[]; source?: object };
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const words = new Intl.Segmenter(undefined, { granularity: "word" });
 const wordJoiners = new Set(["/", "-", "+", "\\", "~", "_", "."]);
@@ -16,12 +17,12 @@ export class TranscriptSelection {
 	private dragged = false;
 	private version = 0;
 
-	private readonly copy: (text: string) => Promise<boolean | string>;
-	private readonly notify: (result: boolean | string) => void;
+	private readonly copy: CopyText;
+	private readonly notify: (result: CopyResult) => void;
 	private readonly render: () => void;
 	private readonly open: (url: string) => void;
 
-	constructor(copy: (text: string) => Promise<boolean | string>, notify: (result: boolean | string) => void, render: () => void, open: (url: string) => void) {
+	constructor(copy: CopyText, notify: (result: CopyResult) => void, render: () => void, open: (url: string) => void) {
 		this.copy = copy;
 		this.notify = notify;
 		this.render = render;
@@ -37,7 +38,9 @@ export class TranscriptSelection {
 	update(frame?: Frame): void {
 		const old = this.frame;
 		if (!old || !frame || old.source !== frame.source || old.x !== frame.x || old.y !== frame.y || old.width !== frame.width
-			|| old.lines.length !== frame.lines.length || old.lines.some((line, index) => line !== frame.lines[index])) this.reset();
+			|| old.lines.length !== frame.lines.length || old.lines.some((line, index) => line !== frame.lines[index])
+			|| old.copyBounds.length !== frame.copyBounds.length
+			|| old.copyBounds.some((bounds, index) => bounds.copyStart !== frame.copyBounds[index]?.copyStart || bounds.copyEnd !== frame.copyBounds[index]?.copyEnd)) this.reset();
 		this.frame = frame;
 	}
 
@@ -81,11 +84,15 @@ export class TranscriptSelection {
 	private async copySelection(): Promise<void> {
 		const text = this.frame!.lines.flatMap((line, row) => {
 			const columns = this.columns(row);
-			return columns ? [stripTerminalSequences(sliceByColumn(line, columns.start, columns.end - columns.start)).trimEnd()] : [];
+			if (!columns) return [];
+			const bounds = this.frame!.copyBounds[row];
+			const start = Math.max(columns.start, bounds?.copyStart ?? 0);
+			const end = Math.min(columns.end, bounds?.copyEnd ?? 0);
+			return [end > start ? stripTerminalSequences(sliceByColumn(line, start, end - start)) : ""];
 		}).join("\n");
 		if (!text) return;
 		const version = this.version;
-		let result: boolean | string;
+		let result: CopyResult;
 		try { result = await this.copy(text); }
 		catch (error) { result = error instanceof Error ? error.message : String(error); }
 		if (version !== this.version) return; // An old clipboard completion must not erase a newer gesture.
