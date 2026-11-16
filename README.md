@@ -290,6 +290,24 @@ the summary placement. A short conversation, or one with no selectable old prefi
 The default interface is a three-pane dashboard: jobs on the left, the selected conversation in the
 middle, and live context on the right. The composer sends to `main` by default; open a job to target it.
 
+**Ctrl-X** toggles the context pane from any dashboard focus; `/context [on|off|toggle]` does the same
+from the composer (for example, `/context off` hides it). Ctrl-X works with legacy control-byte,
+CSI-u/Kitty, and xterm modifyOtherKeys input without changing macOS Option-key settings. Option-C
+continues to type `ç` when the terminal sends it as text. Alt-C remains an optional alias only in
+terminals sending literal `ESC c` (Meta-C).
+
+The choice is saved as `contextPanel: true|false` using the same targeted YAML editor as
+`dchat config set contextPanel false`: it edits the active config (folder-local if present, otherwise
+`$XDG_CONFIG_HOME/durable-chat/config.yaml` or `~/.config/durable-chat/config.yaml`; `.yml` discovery is
+also supported). With `--config` or `DURABLE_CHAT_CONFIG`, only that standalone file is edited. Local
+values override global values; an explicit file stands alone. No conversation state or credential files
+are touched. If saving fails, the preference stays unchanged and an error is shown.
+
+Enabled (the default) means “show when there is room”: at least **140 terminal columns**, with at least
+**80 transcript columns** and **26 context columns** after the jobs pane and separators. Manual pane
+resizing obeys those limits too. Narrow-window hiding never changes the saved choice; an explicitly
+hidden pane stays hidden across resizing and restarts. `0` resets widths only, not visibility.
+
 The mouse wheel, Magic Mouse and trackpad scroll the pane under the pointer, keeping keyboard focus,
 the composer draft and the selected job unchanged. Pane headings stay fixed; keyboard job navigation
 brings the selection back into view. Alt+wheel scrolls faster.
@@ -329,7 +347,7 @@ Folders outside home remain absolute. Allow program-controlled titles in your te
 │   #10 failed         │                               │ tokens: 18.2k         │
 ├──────────────────────┴───────────────────────────────┴──────────────────────┤
 │ to main › _                                                                  │
-│ ENTER send · CTRL-C ×2 quit · TAB jobs · CTRL-T target · CTRL-N new job     │
+│ ENTER send · ? help · TAB focus · SHIFT-ENTER newline                    │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -338,24 +356,29 @@ Folders outside home remain absolute. Allow program-controlled titles in your te
 | `Tab` / `Shift-Tab` | cycle composer → jobs → transcript |
 | `Ctrl-T` | switch composer target main ↔ selected job |
 | `Ctrl-N` | new job brief |
+| `Ctrl-X` | toggle context pane; saved in the active config (`Alt-C` alias for literal `ESC c` input) |
 | `Alt-S` | steer vs follow-up for the current target (main or job) |
 | `Ctrl-V` | paste an image into the composer (main only) |
-| `Enter` | send, open the selected job, or confirm |
+| `Enter` | send, or pin the highlighted job and focus the composer; confirm prompts |
 | `Shift-Enter` | insert a newline in the composer (`Ctrl-J` or `Alt-Enter` fallback) |
-| `j/k`, `g/G`, `PgUp/PgDn` | move selection or scroll |
+| `↑/↓` or `j/k`, `g/G`, `PgUp/PgDn` | move selection or scroll outside the composer |
 | Mouse wheel / trackpad | scroll the pane under the pointer without moving keyboard focus |
 | Cmd-click / Ctrl-click | open transcript links using the terminal's link modifier |
 | `n / c / m / R` | new job · cancel · compact · reset (selected target) |
-| `s / t / f / y` | send-to · expand tools · show finished · copy |
+| `s / t / f / y` | compose (jobs: pin highlighted job) · expand tools · show finished · copy |
 | `/` | start a slash command in the composer; filter jobs when focus is on jobs/transcript |
 | `[` / `]` | shrink / grow the jobs pane |
-| `{` / `}` | shrink / grow the context pane (shows it on narrow terminals) |
+| `{` / `}` | shrink / grow the context pane when there is room (does not enable a hidden pane) |
 | `0` | reset pane widths |
 | `i` | inspector (config, MCP notes, usage); `e` edits the config |
 | `a` | abort the main run (jobs survive) |
-| `?` | help |
+| `?` | full help outside the composer or with an empty draft; `Tab` then `?` preserves a draft |
 | `Ctrl-C` | stop waiting / clear the prompt / close an overlay; arms quitting for 1.5 seconds |
 | `Ctrl-C` twice | quit; small floating confirmation over the dashboard while live work exists |
+
+The footer shows primary actions for the focused pane and a route to full help, not the entire keymap.
+With a draft, **Tab then ?** opens help without changing the text; **/help** also opens it from the
+composer. Context visibility and less-common shortcuts are listed in full help and the table above.
 
 `Ctrl-V` attaches an image to the next message to main. It reads the native clipboard (macOS and
 Windows prebuilds, Linux with X11); `/image <path>` is the fallback where that helper is unavailable.
@@ -375,11 +398,13 @@ line breaks (CRLF and CR normalize to LF) without sending. Large pastes appear a
 markers; their complete text, not the marker, is sent. Visual wrapping adds no newline characters,
 and text copied without line breaks cannot have its original layout reconstructed.
 Pane headings, the target/status line, and individual jobs have spacer rows; the transcript has a solid
-black background. Tab to jobs, then `j/k` or Up/Down to preview the highlighted job's latest transcript
+black background. Tab to jobs, then Up/Down (or `j/k`) to preview the highlighted job's latest transcript
 and live updates without pressing Enter. `g/G` preview the first/last row. Previewing never changes the
-composer or action target: **Enter pins the job** and focuses its transcript; `Ctrl-T` explicitly toggles
-the target. Tab from jobs to transcript keeps the preview for scrolling; returning to the composer
-restores the pinned target's transcript and keeps your draft. Confirmations still name the pinned target.
+composer or action target: **Enter pins the job and focuses the composer**, ready to type immediately.
+It preserves the draft and attachments without submitting them. `s` in jobs does the same; `Ctrl-T`
+explicitly toggles the target. Tab from jobs to transcript keeps the preview for scrolling; returning to
+the composer restores the pinned target's transcript and keeps your draft. `Shift-Tab` from the composer goes straight
+to transcript scrolling (`↑/↓` or `j/k`). Confirmations still name the pinned target.
 While targeting `main`, newly arriving jobs are highlighted automatically unless you are browsing a
 preview. Returning to `main` selects the newest visible job; manual browsing and pinned targets are
 preserved. A single `Ctrl-C` clears the input or stops waiting as before; a second consecutive press
@@ -395,9 +420,22 @@ Jobs run in the background and main stays usable. The TUI is the single store wr
 jobs, and the next run resumes them. `durable-chat --plain` or `durable-chat chat` is the old
 line-oriented interface over the same runtime.
 
-Steering applies to both targets: `Alt-S` selects whether the next message joins the current run
-(`steer`) or queues behind it (`followUp`). The CLI equivalent is `task send <id> "<message>" --steer`
-or `/steer <id> <message>` in the chat or TUI composer.
+**Messages to live jobs default to steering.** Tab to jobs, select with ↑/↓ (or j/k), press Enter,
+then type and Enter to submit. A `(steer)` badge identifies the mode. Admission returns immediately:
+native steering queues at the next supported boundary (for example, after the executing tool round),
+without aborting a tool or starting a concurrent turn. It cannot change a model request already in flight.
+The job stays live through its steering response, using the same durable admission/tracking as Main's
+`task` steer action; a "steering queued" notice is not a delivery or completion claim.
+
+`Alt-S` explicitly chooses follow-up instead: it waits until the current run ends, preserving queued
+message order. This choice is remembered per job, independently of Main (which still defaults to
+follow-up). Completed job conversations default to follow-up/continuation; explicit steering of an idle,
+finished, or finishing job is refused and leaves the draft intact. A just-starting job without an active
+run may also refuse steering; retry once it is running. Images remain Main-only and are retained if a
+job send is refused. Failed admissions retain text for correction/retry.
+
+`/send <id> <message>` explicitly queues follow-up; `/steer <id> <message>` explicitly requests
+steering without changing the pinned target. The CLI equivalent is `task send <id> "<message>" --steer`.
 
 Starting a job from the TUI or `task add` writes a native, model-visible `[host]` start notice into
 main's conversation. Every job reports completion, failure, or abort as a native follow-up input by
@@ -462,6 +500,7 @@ Inside the plain chat or TUI composer:
 /model [id]             pick the session-wide model, across configured providers
 /provider [name]        list configured providers, or make one active for this session
 /thinking [level]       session thinking level for main and jobs; the config file decides the next run
+/context [on|off|toggle] TUI only: show/hide context when there is room; saved in the active config
 /image <path>           attach an image to the next message to main
 /reboot                 archive all app state and start a fresh database (confirmation required)
 /rollback [path]        select saved state, archive current state, restore a copy, and relaunch

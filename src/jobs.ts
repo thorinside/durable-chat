@@ -1,7 +1,9 @@
-import { configure, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { randomUUID } from "node:crypto";
+import { configure, ConversationIdle, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import type {
 	AgentChange,
 	Conversation,
+	ConversationHandle,
 	ConversationId,
 	Cursor,
 	EntryId,
@@ -14,7 +16,7 @@ import type {
 import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { Context } from "@earendil-works/chord/context";
 import type { AnyTaskRecord } from "./format.ts";
-import { JobLink, JobTask, JOB_INSTRUCTIONS, JOB_KIND, MAX_BRIEF_CHARS, jobNoticeEntry, type ForkOrigin, type JobResult, type JobTemplate } from "./tasks.ts";
+import { JobLink, JobTask, JOB_INSTRUCTIONS, JOB_KIND, MAX_BRIEF_CHARS, jobNoticeEntry, type ForkOrigin, type JobResult, type JobState, type JobTemplate } from "./tasks.ts";
 export { JOB_INSTRUCTIONS };
 import type { ResolvedConfig } from "./config.ts";
 import { JobWorkspaceDoc, type JobWorkspace } from "./workspaces.ts";
@@ -279,6 +281,40 @@ export function jobInputDraft(message: string, steer: boolean): JobInputDraft {
 		content: normalizeBrief(message),
 		whenBusy: steer ? "steer" : "followUp",
 	};
+}
+
+/** Admit steering without waiting for the worker; tracking and admission must commit together. */
+export async function queueJobSteering(
+	harness: Pick<Harness, "getTask" | "commit"> & {
+		conversation(id: ConversationId, context: Context): Promise<ConversationHandle | undefined>;
+	},
+	id: number,
+	message: string,
+	context: Context,
+	requestId = `job:${id}:steer:${randomUUID()}`,
+): Promise<void> {
+	if (!Number.isSafeInteger(id) || id <= 0) throw new Error("Provide a valid positive job id.");
+	const draft = { ...jobInputDraft(message, true), content: message };
+	const job = await harness.getTask(id as TaskId, context);
+	if (job === undefined || job.kind !== JOB_KIND) throw new Error(`No job #${id}.`);
+	if (job.state.status === "terminal") throw new Error(`Job #${id} is no longer running. Start or fork a job for new work.`);
+	const conversationId = await jobConversationId(harness, id, context);
+	const conversation = conversationId === undefined ? undefined : await harness.conversation(conversationId as ConversationId, context);
+	if (conversation === undefined) throw new Error(`Job #${id} has no conversation.`);
+	try {
+		await harness.commit(async (tx) => {
+			const current = await tx.task(id as TaskId);
+			if (current === undefined || current.kind !== JOB_KIND || current.state.status === "terminal"
+				|| (current.state.checkpoint as JobState).phase !== "run") throw new Error(`Job #${id} is no longer running.`);
+			const link = await tx.doc(JobLink, id as TaskId);
+			// The job cannot finish between admission and recording the submission it must rejoin.
+			await conversation.submit(tx, { ...draft, requestId, whenIdle: "reject" });
+			link.steering = { requestId, message: draft.content };
+		}, context);
+	} catch (error) {
+		if (error instanceof ConversationIdle) throw new Error(`Job #${id} has no active run to steer; it may have just finished.`);
+		throw error;
+	}
 }
 
 export async function sendToJob(

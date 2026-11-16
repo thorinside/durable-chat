@@ -18,6 +18,8 @@ function conversation(id: number, initial: string) {
 	const entries: EntryRecord[] = [];
 	const listeners = new Set<(call: unknown) => void>();
 	const sent: UserInput[] = [];
+	const drafts: { content: UserInput; whenBusy?: string; whenIdle?: string; requestId?: string }[] = [];
+	let submitError: Error | undefined;
 	let live: unknown;
 	let gate: Promise<void> | undefined;
 	let failure = false;
@@ -28,7 +30,8 @@ function conversation(id: number, initial: string) {
 	};
 	append(initial);
 	return {
-		id, sent, append,
+		id, sent, drafts, append,
+		setSubmitError(error?: Error) { submitError = error; },
 		get watchers() { return listeners.size; },
 		setGate(value: Promise<void> | undefined) { gate = value; },
 		setFailure(value: boolean) { failure = value; },
@@ -50,7 +53,12 @@ function conversation(id: number, initial: string) {
 				async stop() { if (active !== undefined) listeners.delete(active); },
 			};
 		},
-		async submit(input: { content: UserInput }) { sent.push(input.content); },
+		async submit(inputOrTx: { content: UserInput }, draftOrContext?: typeof drafts[number]) {
+			if (submitError !== undefined) throw submitError;
+			const input = "content" in inputOrTx ? inputOrTx : draftOrContext!;
+			drafts.push(input);
+			sent.push(input.content);
+		},
 	};
 }
 
@@ -61,6 +69,7 @@ async function fixture(t: TestContext, count = 2, options: { ids?: number[]; han
 	const jobId = (index: number) => options.ids?.[index] ?? index + 1;
 	const available = new Map(jobs.map((job, index) => [jobId(index), job.id]));
 	const records = jobs.slice(0, count).map((job, index) => ({ id: jobId(index), kind: JOB_KIND, input: { brief: `brief-${index + 1}` }, state: { status: "terminal", outcome: { status: "completed", result: { conversationId: job.id, ...(options.handoff ? { status: "handed_off", handoff: { target: "main" } } : {}) } } } }));
+	const links = new Map<number, { steering?: { requestId: string; message: string } }>();
 	let graphListener: (call: unknown) => void = () => {};
 	const renders = new Set<() => void>();
 	const dashboard = new Dashboard({
@@ -71,9 +80,12 @@ async function fixture(t: TestContext, count = 2, options: { ids?: number[]; han
 				async commit(run: (tx: unknown) => unknown) {
 					return run({
 						async scanTasks() { return { items: records }; },
+						async task(id: number) { return records.find((record) => record.id === id); },
+						async doc(_token: unknown, id: number) { if (!links.has(id)) links.set(id, {}); return links.get(id); },
 						async scanConversations(filter: { ownerTaskId: number }) { const id = available.get(filter.ownerTaskId); return { items: id === undefined ? [] : [{ id }] }; },
 					});
 				},
+				async getTask(id: number) { return records.find((record) => record.id === id); },
 				async snapshot() { return undefined; },
 				async conversation(id: number) { return jobs.find((job) => job.id === id); },
 				async watchTaskGraph() { return { start(listener: typeof graphListener) { graphListener = listener; }, async stop() {} }; },
@@ -94,7 +106,7 @@ async function fixture(t: TestContext, count = 2, options: { ids?: number[]; han
 		});
 	};
 	return {
-		dashboard, main, jobs, records, available, frame, until,
+		dashboard, main, jobs, records, available, links, frame, until,
 		async key(key: string) { await dashboard.handleInput(key); },
 		refresh(tasks: Record<string, unknown> = {}) { graphListener({ kind: "value", value: { tasks } }); t.mock.timers.tick(120); },
 	};
@@ -125,7 +137,15 @@ for (const id of [10441, 104411, 1044111, 10441111, Number.MAX_SAFE_INTEGER]) {
 	});
 }
 
-for (const [name, down, up] of [["j/k", "j", "k"], ["arrow keys", "\x1b[B", "\x1b[A"]]) {
+const navigationKeys = [
+	["j/k", "j", "k"],
+	["CSI arrow keys", "\x1b[B", "\x1b[A"],
+	["application arrow keys", "\x1bOB", "\x1bOA"],
+	["modified-protocol arrow keys", "\x1b[1;1B", "\x1b[1;1A"],
+	["repeated arrow events", "\x1b[1;1:2B", "\x1b[1;1:2A"],
+] as const;
+
+for (const [name, down, up] of navigationKeys) {
 	test(`${name} previews the highlighted job before Enter without retargeting the draft`, { timeout: 5000 }, async (t) => {
 		const app = await fixture(t);
 		await app.key("unsent-main-draft");
@@ -135,9 +155,13 @@ for (const [name, down, up] of [["j/k", "j", "k"], ["arrow keys", "\x1b[B", "\x1
 		await app.key(down!);
 		assert.doesNotMatch(app.frame(), /JOB-TWO-HISTORY/, "old content clears immediately, even before async read completes");
 		await app.until((frame) => frame.includes("JOB-ONE-HISTORY"));
+		for (let repeat = 0; repeat < 3; repeat++) await app.key(down);
+		assert.match(app.frame(), /job #1 \(preview\)/, "repeated navigation clamps at the last row");
 		assert.match(app.frame(), /to main › unsent-main-draft/);
 		await app.key(up!);
 		await app.until((frame) => frame.includes("JOB-TWO-HISTORY"));
+		for (let repeat = 0; repeat < 3; repeat++) await app.key(up);
+		assert.match(app.frame(), /job #2 \(preview\)/, "repeated navigation clamps at the first row");
 		await app.key("\t"); // May scroll the preview without activating it.
 		assert.match(app.frame(), /focus transcript/);
 		await app.key("\t"); // Back to composer restores the actual destination's transcript.
@@ -153,9 +177,8 @@ test("Enter activates the preview while later browsing preserves a pinned job's 
 	await app.key("\t");
 	await app.until((frame) => frame.includes("JOB-TWO-HISTORY"));
 	await app.key("\r");
-	await app.until((frame) => frame.includes("focus transcript"));
+	assert.match(app.frame(), /focus composer/);
 	assert.match(app.frame(), /to job #2 ›/);
-	await app.key("\t");
 	await app.key("job-two-draft");
 	await app.key("\t");
 	await app.key("j");
@@ -306,4 +329,184 @@ test("durable job navigation reads fresh history and watches new entries without
 	await dashboard.handleInput("\x1b[Z");
 	assert.match(frame(), /DURABLE-MAIN/);
 	assert.doesNotMatch(frame(), /DURABLE-WATCH-UPDATE/);
+});
+
+// Preview-only tests above cannot protect the ingress default, durable admission or draft retention.
+test("messaging the highlighted running job explicitly pins it and defaults to tracked steering without auto-sending the draft", { timeout: 5000 }, async (t) => {
+	const app = await fixture(t);
+	app.records[1]!.state = { status: "running", checkpoint: { phase: "run" } } as never;
+	app.refresh({ "2": { id: 2, kind: JOB_KIND, state: { status: "running" } } });
+	await app.until((frame) => frame.includes("running"));
+	await app.key("preserved-draft");
+	await app.key("\t");
+	await app.until((frame) => frame.includes("JOB-TWO-HISTORY"));
+	assert.match(app.frame(), /to main › preserved-draft/);
+	await app.key("\r");
+	assert.match(app.frame(), /focus composer/);
+	assert.match(app.frame(), /to job #2 \(steer\) › preserved-draft/);
+	assert.deepEqual(app.jobs[1]!.sent, []);
+	assert.deepEqual(app.main.sent, []);
+	await app.key("\r");
+	assert.deepEqual(app.jobs[1]!.sent, ["preserved-draft"]);
+	const draft = app.jobs[1]!.drafts[0]!;
+	assert.equal(draft.whenBusy, "steer");
+	assert.equal(draft.whenIdle, "reject");
+	assert.deepEqual(app.links.get(2)?.steering, { requestId: draft.requestId, message: "preserved-draft" });
+	assert.match(app.frame(), /steering queued for job #2/);
+	assert.doesNotMatch(app.frame(), /preserved-draft/);
+	await app.key("\x14"); // Ctrl-T returns to Main without changing its input mode.
+	await app.until((frame) => frame.includes("to main ›"));
+	assert.deepEqual(app.main.sent, []);
+	assert.deepEqual(app.jobs[0]!.sent, []);
+});
+
+test("Enter-pinned running jobs support explicit follow-up without a preview changing the send destination", { timeout: 5000 }, async (t) => {
+	const app = await fixture(t);
+	app.records[1]!.state = { status: "running", checkpoint: { phase: "run" } } as never;
+	app.refresh({ "2": { id: 2, kind: JOB_KIND, state: { status: "running" } } });
+	await app.until((frame) => frame.includes("running"));
+	await app.key("\t");
+	await app.until((frame) => frame.includes("JOB-TWO-HISTORY"));
+	await app.key("\r");
+	assert.match(app.frame(), /focus composer/);
+	assert.match(app.frame(), /to job #2 \(steer\) ›/);
+	await app.key("\x1bs"); // Alt-S explicitly queues after the run.
+	await app.key("follow-up-draft");
+	await app.key("\t");
+	await app.key("j");
+	await app.until((frame) => frame.includes("JOB-ONE-HISTORY"));
+	await app.key("\x1b[Z");
+	assert.match(app.frame(), /to job #2 › follow-up-draft/);
+	await app.key("\r");
+	assert.deepEqual(app.jobs[1]!.sent, ["follow-up-draft"]);
+	assert.equal(app.jobs[1]!.drafts[0]!.whenBusy, "followUp");
+	assert.equal(app.links.get(2)?.steering, undefined);
+	assert.match(app.frame(), /follow-up queued for job #2/);
+	assert.deepEqual(app.jobs[0]!.sent, []);
+	assert.deepEqual(app.main.sent, []);
+});
+
+test("failed steering retains the pinned draft and retries without recording or duplicating failed input", { timeout: 5000 }, async (t) => {
+	const app = await fixture(t);
+	app.records[1]!.state = { status: "running", checkpoint: { phase: "run" } } as never;
+	app.refresh({ "2": { id: 2, kind: JOB_KIND, state: { status: "running" } } });
+	await app.until((frame) => frame.includes("running"));
+	await app.key("\t");
+	await app.until((frame) => frame.includes("JOB-TWO-HISTORY"));
+	await app.key("s");
+	await app.key("retry-this-draft");
+	app.jobs[1]!.setSubmitError(new Error("steering admission unavailable"));
+	await app.key("\r");
+	assert.match(app.frame(), /steering admission unavailable/);
+	assert.match(app.frame(), /to job #2 \(steer\) › retry-this-draft/);
+	assert.deepEqual(app.jobs[1]!.sent, []);
+	assert.equal(app.links.get(2)?.steering, undefined);
+	app.jobs[1]!.setSubmitError();
+	await app.key("\r");
+	assert.deepEqual(app.jobs[1]!.sent, ["retry-this-draft"]);
+	assert.deepEqual(app.main.sent, []);
+});
+
+test("completed job input defaults to follow-up while explicit steering rejects and retains pinned and addressed drafts", { timeout: 5000 }, async (t) => {
+	const app = await fixture(t);
+	await app.key("\t");
+	await app.until((frame) => frame.includes("JOB-TWO-HISTORY"));
+	await app.key("s");
+	assert.match(app.frame(), /to job #2 ›/);
+	await app.key("continue-completed");
+	await app.key("\r");
+	assert.deepEqual(app.jobs[1]!.sent, ["continue-completed"]);
+	assert.equal(app.jobs[1]!.drafts[0]!.whenBusy, "followUp");
+	await app.key("\x1bs");
+	await app.key("keep-this-draft");
+	await app.key("\r");
+	assert.match(app.frame(), /no longer running/);
+	assert.match(app.frame(), /to job #2 \(steer\) › keep-this-draft/);
+	await app.key("\x01"); // Ctrl-A then Ctrl-K clears without relying on cursor position.
+	await app.key("\x0b");
+	await app.key("/steer 1 addressed-draft");
+	await app.key("\r");
+	assert.match(app.frame(), /no longer running/);
+	assert.match(app.frame(), /to job #2 \(steer\) › \/steer 1 addressed-draft/);
+	assert.deepEqual(app.jobs[1]!.sent, ["continue-completed"]);
+	assert.deepEqual(app.jobs[0]!.sent, []);
+	assert.deepEqual(app.main.sent, []);
+});
+
+test("Enter activates immediately during a pending preview read and its completion preserves later focus and multiline input", { timeout: 5000 }, async (t) => {
+	const app = await fixture(t);
+	const delayed = Promise.withResolvers<void>();
+	app.jobs[1]!.setGate(delayed.promise);
+	await app.key("first line");
+	await app.key("\x1b[13;2u");
+	await app.key("second line");
+	await app.key("\t");
+	await app.key("\r");
+	assert.match(app.frame(), /focus composer/);
+	assert.match(app.frame(), /to job #2 ›/);
+	await app.key("\x1b[13;2u");
+	await app.key("third line");
+	await app.key("\t");
+	await app.key("\t"); // Read/scroll remains accessible via the focus cycle.
+	assert.match(app.frame(), /focus transcript/);
+	delayed.resolve();
+	await app.until((frame) => frame.includes("JOB-TWO-HISTORY"));
+	assert.match(app.frame(), /focus transcript/, "finishing the load must not steal focus back to the composer");
+	await app.key("\t");
+	await app.key("\r");
+	assert.deepEqual(app.jobs[1]!.sent, ["first line\nsecond line\nthird line"]);
+	assert.deepEqual(app.main.sent, []);
+});
+
+test("transcript arrows and j/k scroll identically through repeated steps and both bounds without retargeting the draft", { timeout: 5000 }, async (t) => {
+	const app = await fixture(t);
+	for (let index = 0; index < 45; index++) app.jobs[1]!.append(`scroll-evidence-${index}`);
+	await app.key("keep-main-draft");
+	await app.key("\t");
+	await app.until((frame) => frame.includes("scroll-evidence-44"));
+	await app.key("\t");
+	const bottom = app.frame();
+	await app.key("k");
+	await app.key("k");
+	const twoUp = app.frame();
+	assert.notEqual(twoUp, bottom);
+	await app.key("g");
+	const top = app.frame();
+	await app.key("j");
+	await app.key("j");
+	const twoDown = app.frame();
+	for (const [, down, up] of navigationKeys.slice(1)) {
+		await app.key("G");
+		await app.key(up);
+		await app.key(up);
+		assert.equal(app.frame(), twoUp);
+		for (let repeat = 0; repeat < 80; repeat++) await app.key(up);
+		assert.equal(app.frame(), top);
+		await app.key(down);
+		await app.key(down);
+		assert.equal(app.frame(), twoDown);
+		for (let repeat = 0; repeat < 80; repeat++) await app.key(down);
+		assert.equal(app.frame(), bottom);
+	}
+	assert.match(app.frame(), /to main › keep-main-draft/);
+	assert.deepEqual(app.main.sent, []);
+	assert.deepEqual(app.jobs.map((job) => job.sent), [[], []]);
+});
+
+test("composer j/k remain literal text and arrow keys edit multiline input rather than navigate jobs", { timeout: 5000 }, async (t) => {
+	const app = await fixture(t);
+	await app.key("\t");
+	await app.key("\r");
+	assert.match(app.frame(), /focus composer/);
+	await app.key("j");
+	await app.key("\x1b[13;2u");
+	await app.key("k");
+	await app.key("\x1b[A");
+	await app.key("!");
+	await app.key("\x1b[B");
+	await app.key("?");
+	await app.key("\r");
+	assert.deepEqual(app.jobs[1]!.sent, ["j!\nk?"]);
+	assert.deepEqual(app.jobs[0]!.sent, []);
+	assert.deepEqual(app.main.sent, []);
 });
