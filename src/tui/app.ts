@@ -1,4 +1,3 @@
-import { Buffer } from "node:buffer";
 import { matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { getNativeClipboard } from "@earendil-works/pi-tui";
@@ -25,13 +24,14 @@ import {
 } from "../jobs.ts";
 import type { AnyTaskRecord } from "../format.ts";
 import { buildJobRows, clampScroll, filterJobs, moveSelection, reconcileJobSelection, targetLabel, type Focus, type JobRow, type Target, type UiMode } from "./state.ts";
-import { backgroundLine, bold, dim, fg, padLines, shortenHome, statusText, usageTotals, ACCENT, BORDER, COMPOSER_BG, GREEN, MUTED, RED, TEXT, TRANSCRIPT_BG, YELLOW } from "./format.ts";
+import { transcriptLine, type TranscriptLine, backgroundLine, bold, dim, fg, padLines, shortenHome, statusText, usageTotals, ACCENT, BORDER, COMPOSER_BG, GREEN, MUTED, RED, TEXT, TRANSCRIPT_BG, YELLOW } from "./format.ts";
 import { attachmentLabel, createImagePaster, MAX_ATTACHMENTS, type ImageAttachment, type ImagePaster } from "../images.ts";
 import { compactionLimit, contextPercent, formatTokenCount } from "../context-usage.ts";
 import { Transcript } from "./transcript.ts";
 import { overlayDialog } from "./dialog.ts";
 import { JOB_KIND } from "../tasks.ts";
 import { TranscriptSelection } from "./selection.ts";
+import { createTextCopier, copyNotice, type CopyText } from "./clipboard.ts";
 import { openBrowser } from "./browser.ts";
 import { Composer, isComposerNewline } from "./composer.ts";
 
@@ -62,8 +62,8 @@ export type DashboardOptions = {
 	onEditConfig?: () => Promise<string>;
 	/** Injected so a test can stand in for the native clipboard. */
 	paster?: ImagePaster;
-	/** Mouse-selection clipboard path; true means copied, false/string means failure. */
-	copySelection?: (text: string) => Promise<boolean | string>;
+	/** Shared selection/answer clipboard path; only true confirms a local write. */
+	copySelection?: CopyText;
 	openUrl?: (url: string) => void;
 };
 
@@ -84,6 +84,7 @@ type AppState = {
 export class Dashboard implements Component {
 	readonly capturesViewportInput = true;
 	private readonly selection: TranscriptSelection;
+	private readonly copyText: CopyText;
 	private readonly runtime: AppRuntime;
 	private readonly rowsOf: () => number;
 	private readonly requestRender: () => void;
@@ -150,12 +151,10 @@ export class Dashboard implements Component {
 	private quitArmTimer: NodeJS.Timeout | undefined;
 
 	constructor(options: DashboardOptions) {
+		this.copyText = options.copySelection ?? createTextCopier();
 		this.selection = new TranscriptSelection(
-			options.copySelection ?? (async (text) => {
-				process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
-				return true;
-			}),
-			(result) => this.flash(result === true ? "copied to clipboard" : typeof result === "string" ? result : "Copy failed", result === true ? "info" : "error"),
+			this.copyText,
+			(result) => { const notice = copyNotice(result); this.flash(notice.text, notice.kind); },
 			options.requestRender,
 			options.openUrl ?? ((url) => { void openBrowser(url).catch((error) => this.flash(`Could not open link: ${message(error)}`, "error")); }),
 		);
@@ -935,11 +934,11 @@ export class Dashboard implements Component {
 		this.renderSoon();
 	}
 
-	private transcriptLines(width: number): string[] {
+	private transcriptLines(width: number): TranscriptLine[] {
 		if (this.current === undefined) return [];
 		const lines = [...this.current.lines(width, this.state.toolsExpanded), ...this.current.liveLines(width)];
 		// A trailing entry spacer must not occupy the only content row in a short terminal.
-		while (lines.length > 0 && stripTerminalSequences(lines.at(-1)!).trim().length === 0) lines.pop();
+		while (lines.length > 0 && stripTerminalSequences(lines.at(-1)!.text).trim().length === 0) lines.pop();
 		return lines;
 	}
 
@@ -1001,7 +1000,7 @@ export class Dashboard implements Component {
 		return width >= 110 ? Math.max(26, Math.min(36, Math.round(width * 0.23))) : 0;
 	}
 
-	private copy(): void {
+	private async copy(): Promise<void> {
 		const target = this.displayTarget;
 		let text = "";
 		if (target.kind === "job") {
@@ -1022,8 +1021,10 @@ export class Dashboard implements Component {
 			this.flash("nothing to copy", "error");
 			return;
 		}
-		process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
-		this.flash("copied to clipboard");
+		try {
+			const notice = copyNotice(await this.copyText(text));
+			this.flash(notice.text, notice.kind);
+		} catch { this.flash("Copy failed", "error"); }
 	}
 
 	render(width: number): string[] {
@@ -1079,10 +1080,11 @@ export class Dashboard implements Component {
 	private renderBody(width: number, height: number): string[] {
 		const { jobsWidth, transcriptWidth, contextWidth } = this.paneWidths(width);
 		const jobs = jobsWidth > 0 ? padLines(this.renderJobs(jobsWidth, height), height, jobsWidth) : [];
-		const transcript = padLines(this.renderTranscript(transcriptWidth, height), height, transcriptWidth)
+		const rows = this.renderTranscript(transcriptWidth, height);
+		const transcript = padLines(rows.map((line) => line.text), height, transcriptWidth)
 			.map((line) => backgroundLine(line, transcriptWidth, TRANSCRIPT_BG));
 		if (this.state.mode === "chat") {
-			this.selection.update({ x: jobsWidth > 0 ? jobsWidth + 1 : 0, y: 2 + PANE_HEADING_ROWS, width: transcriptWidth, lines: transcript.slice(PANE_HEADING_ROWS), source: this.current });
+			this.selection.update({ x: jobsWidth > 0 ? jobsWidth + 1 : 0, y: 2 + PANE_HEADING_ROWS, width: transcriptWidth, lines: transcript.slice(PANE_HEADING_ROWS), copyBounds: rows.slice(PANE_HEADING_ROWS), source: this.current });
 			transcript.splice(PANE_HEADING_ROWS, height - PANE_HEADING_ROWS, ...this.selection.lines());
 		}
 		const context = contextWidth > 0 ? padLines(this.renderContext(contextWidth, height), height, contextWidth) : [];
@@ -1124,21 +1126,21 @@ export class Dashboard implements Component {
 		return [...lines, ...content.slice(start, start + Math.max(1, height - PANE_HEADING_ROWS))];
 	}
 
-	private renderTranscript(width: number, height: number): string[] {
+	private renderTranscript(width: number, height: number): TranscriptLine[] {
 		const target = `${targetLabel(this.displayTarget)}${this.previewJobId === undefined ? "" : " (preview)"}`;
 		const live = this.current?.live;
 		const active = live?.generation !== undefined || live?.tools?.some((slot) => slot.status === "running") === true;
 		const title = `${bold("TRANSCRIPT")} ${dim(target)}${active ? fg("  ● live", GREEN) : ""}${this.scroll > 0 ? dim(`  ↑${this.scroll}`) : ""}`;
-		const lines = [truncateToWidth(title, width, "", true), ""];
+		const lines = [transcriptLine(truncateToWidth(title, width, "", true)), transcriptLine("")];
 		const transcript = this.current;
 		if (transcript === undefined) {
-			lines.push(dim(this.displayLoad === undefined ? "  No conversation is available for this job yet." : "  Loading job transcript…"));
+			lines.push(transcriptLine(dim(this.displayLoad === undefined ? "  No conversation is available for this job yet." : "  Loading job transcript…"), 2));
 			return lines;
 		}
 		const contentHeight = Math.max(1, height - PANE_HEADING_ROWS);
 		const all = this.transcriptLines(width);
 		if (all.length === 0) {
-			lines.push(dim("  No messages yet. Type below and press Enter."));
+			lines.push(transcriptLine(dim("  No messages yet. Type below and press Enter."), 2));
 			return lines;
 		}
 		const offset = clampScroll(this.scroll, all.length, contentHeight);
@@ -1669,7 +1671,7 @@ export class Dashboard implements Component {
 			return;
 		}
 		if (data === "y") {
-			this.copy();
+			void this.copy();
 			return;
 		}
 		if (data === "q") {

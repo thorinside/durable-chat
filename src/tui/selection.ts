@@ -1,8 +1,10 @@
+import type { CopyResult, CopyText } from "./clipboard.ts";
 import { getOsc8LinkAtColumn, sliceByColumn, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import type { TuiMouseEvent } from "@earendil-works/pi-tui";
+import type { TranscriptLine } from "./format.ts";
 
 type Point = { row: number; col: number };
-type Frame = { x: number; y: number; width: number; lines: string[]; source?: object };
+type Frame = { x: number; y: number; width: number; lines: string[]; copyBounds: Omit<TranscriptLine, "text">[]; source?: object };
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const words = new Intl.Segmenter(undefined, { granularity: "word" });
 const wordJoiners = new Set(["/", "-", "+", "\\", "~", "_", "."]);
@@ -16,12 +18,12 @@ export class TranscriptSelection {
 	private dragged = false;
 	private version = 0;
 
-	private readonly copy: (text: string) => Promise<boolean | string>;
-	private readonly notify: (result: boolean | string) => void;
+	private readonly copy: CopyText;
+	private readonly notify: (result: CopyResult) => void;
 	private readonly render: () => void;
 	private readonly open: (url: string) => void;
 
-	constructor(copy: (text: string) => Promise<boolean | string>, notify: (result: boolean | string) => void, render: () => void, open: (url: string) => void) {
+	constructor(copy: CopyText, notify: (result: CopyResult) => void, render: () => void, open: (url: string) => void) {
 		this.copy = copy;
 		this.notify = notify;
 		this.render = render;
@@ -37,7 +39,14 @@ export class TranscriptSelection {
 	update(frame?: Frame): void {
 		const old = this.frame;
 		if (!old || !frame || old.source !== frame.source || old.x !== frame.x || old.y !== frame.y || old.width !== frame.width
-			|| old.lines.length !== frame.lines.length || old.lines.some((line, index) => line !== frame.lines[index])) this.reset();
+			|| old.lines.length !== frame.lines.length || old.lines.some((line, index) => line !== frame.lines[index])
+			|| old.copyBounds.length !== frame.copyBounds.length
+			|| old.copyBounds.some((bounds, index) => {
+				const next = frame.copyBounds[index];
+				return bounds.copyStart !== next?.copyStart || bounds.copyEnd !== next?.copyEnd || bounds.copySkip !== next?.copySkip
+					|| bounds.code?.source !== next?.code?.source || bounds.code?.start !== next?.code?.start
+					|| bounds.code?.end !== next?.code?.end || bounds.code?.continues !== next?.code?.continues;
+			})) this.reset();
 		this.frame = frame;
 	}
 
@@ -79,13 +88,38 @@ export class TranscriptSelection {
 	}
 
 	private async copySelection(): Promise<void> {
-		const text = this.frame!.lines.flatMap((line, row) => {
+		let text = "";
+		let selectedRows = 0;
+		let previousCodeEnd: number | undefined;
+		for (const [row, line] of this.frame!.lines.entries()) {
 			const columns = this.columns(row);
-			return columns ? [stripTerminalSequences(sliceByColumn(line, columns.start, columns.end - columns.start)).trimEnd()] : [];
-		}).join("\n");
+			if (!columns) continue;
+			const bounds = this.frame!.copyBounds[row];
+			if (bounds?.copySkip) { previousCodeEnd = undefined; continue; }
+			const start = Math.max(bounds?.copyStart ?? 0, Math.min(columns.start, bounds?.copyEnd ?? 0));
+			const end = Math.max(start, Math.min(columns.end, bounds?.copyEnd ?? 0));
+			const fragment = stripTerminalSequences(sliceByColumn(line, start, end - start));
+			const code = bounds?.code;
+			if (code) {
+				const offset = stripTerminalSequences(sliceByColumn(line, bounds.copyStart, start - bounds.copyStart)).length;
+				const sourceStart = code.start + offset;
+				const sourceEnd = sourceStart + fragment.length;
+				// Only semantic continuations join. Restore whitespace dropped by word wrapping
+				// from the toolkit's code source, never by guessing from rail characters.
+				if (code.continues && previousCodeEnd !== undefined) text += code.source.slice(previousCodeEnd, sourceStart);
+				else if (selectedRows > 0) text += "\n";
+				text += code.source.slice(sourceStart, sourceEnd);
+				previousCodeEnd = sourceEnd;
+			} else {
+				if (selectedRows > 0) text += "\n";
+				text += fragment;
+				previousCodeEnd = undefined;
+			}
+			selectedRows++;
+		}
 		if (!text) return;
 		const version = this.version;
-		let result: boolean | string;
+		let result: CopyResult;
 		try { result = await this.copy(text); }
 		catch (error) { result = error instanceof Error ? error.message : String(error); }
 		if (version !== this.version) return; // An old clipboard completion must not erase a newer gesture.

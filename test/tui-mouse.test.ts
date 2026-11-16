@@ -6,11 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TuiAltScreen, getCapabilities, getOsc8LinkAtColumn, setCapabilities, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import type { Terminal, TuiMouseEvent } from "@earendil-works/pi-tui";
+import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai/providers/faux";
 import { openRuntime } from "../src/harness.ts";
 import { createJobInCommit, jobOptionsOf } from "../src/jobs.ts";
 import { Dashboard } from "../src/tui/app.ts";
+import { createTextCopier, type CopyText } from "../src/tui/clipboard.ts";
 
-async function fixture(t: TestContext, jobs = 0, linkText?: string, copySelection?: (text: string) => Promise<boolean | string>) {
+async function fixture(t: TestContext, jobs = 0, linkText?: string, copySelection?: CopyText, answer?: string) {
 	const dir = mkdtempSync(join(tmpdir(), "dchat-mouse-"));
 	const configPath = join(dir, "config.yaml");
 	writeFileSync(configPath, "provider: faux\nautoContinue: false\nmcp:\n  enabled: false\n");
@@ -39,6 +41,7 @@ async function fixture(t: TestContext, jobs = 0, linkText?: string, copySelectio
 			await tx.appendEntry(runtime.root.id, { kind: "pi.user", model: [{ role: "user", content: `entry-${index}`, timestamp: 0 }] });
 		}
 		if (linkText !== undefined) await tx.appendEntry(runtime.root.id, { kind: "pi.user", model: [{ role: "user", content: linkText, timestamp: 0 }] });
+		if (answer !== undefined) await tx.appendEntry(runtime.root.id, { kind: "pi.assistant", model: [fauxAssistantMessage([fauxText(answer)])] });
 	}, runtime.context);
 	const started = await runtime.root.commit(async (tx) => {
 		const result = [];
@@ -239,7 +242,7 @@ test("multiline selection highlights and copies only transcript cells including 
 	assert.ok(highlightedRows(app).length > 0);
 	pointer(app, "release", x + 7, top + 3);
 	const expected = before.slice(top, top + 4).map((line, index) =>
-		line.slice(x + (index === 0 ? 2 : 0), x + (index === 3 ? 8 : width)).trimEnd()).join("\n");
+		line.slice(x + (index === 0 ? 2 : 0), x + (index === 3 ? 8 : width)).replace(/^ /, "").trimEnd()).join("\n");
 	assert.deepEqual(texts, [expected]);
 	assert.ok(highlightedRows(app).length > 0, "pending clipboard copy retains selection");
 	copied.resolve(true);
@@ -262,12 +265,12 @@ test("selection clamps all transcript edges at narrow, wide and manually resized
 		pointer(app, "press", x, top);
 		pointer(app, "drag", columns + 20, app.height + 20);
 		pointer(app, "release", columns + 20, app.height + 20);
-		assert.equal(app.copied.at(-1), before.slice(top, bottom + 1).map((line) => line.slice(x, x + width).trimEnd()).join("\n"));
+		assert.equal(app.copied.at(-1), before.slice(top, bottom + 1).map((line) => line.slice(x, x + width).replace(/^ /, "").trimEnd()).join("\n"));
 		await Promise.resolve();
 		pointer(app, "press", x + width - 1, bottom);
 		pointer(app, "drag", -5, -5);
 		pointer(app, "release", -5, -5);
-		assert.equal(app.copied.at(-1), before.slice(top, bottom + 1).map((line) => line.slice(x, x + width).trimEnd()).join("\n"));
+		assert.equal(app.copied.at(-1), before.slice(top, bottom + 1).map((line) => line.slice(x, x + width).replace(/^ /, "").trimEnd()).join("\n"));
 		await Promise.resolve();
 	}
 });
@@ -340,6 +343,147 @@ test("double and triple clicks still copy transcript words and lines without sel
 		pointer(app, "release", x, y);
 		await Promise.resolve();
 	}
-	assert.deepEqual(app.copied, ["selectionword", before[y]!.slice(bounds.x, bounds.x + bounds.width).trimEnd()]);
+	assert.deepEqual(app.copied, ["selectionword", before[y]!.slice(bounds.x, bounds.x + bounds.width).replace(/^ /, "").trimEnd()]);
 	assert.deepEqual(highlightedRows(app), []);
+});
+
+test("copy excludes speaker gutters and right cell fill while preserving code indentation and blank lines", async (t) => {
+	const app = await fixture(t, 0, "```ts\nif (ok) {\n  run(界é🙂);  next();\n\n  done();\n}\n```");
+	const frame = app.frame();
+	const { x, width } = transcriptBounds(app);
+	const first = frame.findIndex((line) => line.includes("if (ok)"));
+	const last = frame.findIndex((line) => line.includes("done();"));
+	assert.ok(first >= 4 && last > first);
+	pointer(app, "press", x, first); // Start in the continuation gutter, not source indentation.
+	pointer(app, "drag", x + width - 1, last); // End in padded terminal cells.
+	pointer(app, "release", x + width - 1, last);
+	assert.deepEqual(app.copied, ["if (ok) {\n  run(界é🙂);  next();\n\n  done();"]);
+	await Promise.resolve();
+	assert.deepEqual(highlightedRows(app), []);
+
+	const count = app.copied.length;
+	pointer(app, "press", x, first);
+	pointer(app, "drag", x + 4, first);
+	pointer(app, "release", x + 4, first);
+	assert.equal(app.copied.length, count, "selecting only decorative gutter cells copies nothing");
+});
+
+// Ordinary fenced-code tests have no nested rails or soft wraps; those display rows
+// cannot establish where source code begins or whether a newline belongs in a command.
+test("nested code rails and fences are excluded without stripping literal rails, indentation or blank code rows", async (t) => {
+	const source = 'if (ok) {\n  if (next) {\n    run("│", "界é🙂");  \n  \n\n  }\n}';
+	const content = ["```ts", ...source.split("\n"), "```"].map((line) => `> > ${line}`).join("\n");
+	const app = await fixture(t, 0, content);
+	const frame = app.frame();
+	const { x, width } = transcriptBounds(app);
+	const first = frame.findIndex((line) => line.includes("```ts"));
+	const last = frame.findLastIndex((line) => line.includes("```"));
+	assert.ok(first >= 4 && last > first, "the entire synthetic code block is visible");
+	assert.ok(app.rawFrame().every((line) => !line.includes("dchat-internal-code:")), "semantic annotations must never reach terminal output");
+	pointer(app, "press", x, first);
+	pointer(app, "drag", x + width - 1, last);
+	pointer(app, "release", x + width - 1, last);
+	assert.deepEqual(app.copied, [source]);
+});
+
+test("code selection rejoins soft-wrapped commands with source spaces but retains real code newlines after resizing", async (t) => {
+	const command = '  curl --header "界é🙂" --data "one  two" https://example.test/a/long/path --flag --last END';
+	const source = `${command}\n  next();`;
+	const app = await fixture(t, 0, `\`\`\`sh\n${source}\n\`\`\``);
+	for (const columns of [52, 100, 140]) {
+		const frame = app.resize(columns);
+		const { x, width } = transcriptBounds(app);
+		const first = frame.findIndex((line) => line.includes("curl"));
+		const commandEnd = frame.findIndex((line) => line.includes("END"));
+		const last = frame.findIndex((line) => line.includes("next();"));
+		assert.ok(first >= 4 && commandEnd > first && last > commandEnd, "the command wraps and the real next line is visible");
+		pointer(app, "press", x, first);
+		pointer(app, "drag", x + width - 1, last);
+		pointer(app, "release", x + width - 1, last);
+		assert.equal(app.copied.at(-1), source);
+		await Promise.resolve();
+	}
+});
+
+test("reverse partial selection across code wraps copies whole Unicode graphemes and only the selected source range", async (t) => {
+	const command = '  run(界é🙂); --data "one  two" https://example.test/a/long/path --flag END trailing';
+	const app = await fixture(t, 0, `\`\`\`\n${command}\n\`\`\``);
+	const frame = app.resize(52);
+	const first = frame.findIndex((line) => line.includes("界"));
+	const last = frame.findIndex((line) => line.includes("END"));
+	assert.ok(first >= 4 && last > first);
+	const start = visibleWidth(frame[first]!.slice(0, frame[first]!.indexOf("界"))) + 1;
+	const end = visibleWidth(frame[last]!.slice(0, frame[last]!.indexOf("END")));
+	pointer(app, "press", end, last); // Include E, not ND or the remainder of the row.
+	pointer(app, "drag", start, first); // Inside the second cell of 界.
+	pointer(app, "release", start, first);
+	assert.deepEqual(app.copied, [command.slice(command.indexOf("界"), command.indexOf("END") + 1)]);
+});
+
+test("partial-line copy preserves deliberately selected internal spaces at the selection edge", async (t) => {
+	const app = await fixture(t, 0, "```\n  run(界é🙂);  next();\n```");
+	const frame = app.frame();
+	const y = frame.findIndex((line) => line.includes("run("));
+	const x = visibleWidth(frame[y]!.slice(0, frame[y]!.indexOf("run(")));
+	const selected = "run(界é🙂);  ";
+	pointer(app, "press", x, y);
+	pointer(app, "drag", x + visibleWidth(selected) - 1, y);
+	pointer(app, "release", x + visibleWidth(selected) - 1, y);
+	assert.deepEqual(app.copied, [selected], "selection serialization must not trimEnd a partial substring");
+	await Promise.resolve();
+	const spaces = x + visibleWidth(selected) - 2;
+	pointer(app, "press", spaces, y);
+	pointer(app, "drag", spaces + 1, y);
+	pointer(app, "release", spaces + 1, y);
+	assert.deepEqual(app.copied, [selected, "  "], "deliberately selected internal whitespace alone is content");
+});
+
+test("native copy clears the highlight only after the clipboard writer completes", async (t) => {
+	const started = Promise.withResolvers<void>();
+	const completed = Promise.withResolvers<void>();
+	const texts: string[] = [];
+	const copy = createTextCopier({ platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal" }, isTTY: true,
+		nativeClipboard: () => ({ getText: () => assert.fail("no reads"), getImage: () => assert.fail("no reads"),
+			setText: (text) => { texts.push(text); started.resolve(); return completed.promise; } }),
+		write: () => assert.fail("no OSC 52 for local Terminal"),
+	});
+	const app = await fixture(t, 0, "copy-native", copy);
+	const before = app.frame();
+	const y = before.findIndex((line) => line.includes("copy-native"));
+	const x = before[y]!.indexOf("copy-native");
+	pointer(app, "press", x, y); pointer(app, "drag", x + 10, y); pointer(app, "release", x + 10, y);
+	await started.promise;
+	assert.deepEqual(texts, ["copy-native"]);
+	assert.ok(highlightedRows(app).length > 0);
+	completed.resolve();
+	for (let index = 0; index < 4; index++) await Promise.resolve();
+	app.frame();
+	assert.deepEqual(highlightedRows(app), []);
+	assert.match(app.frame().join("\n"), /copied to clipboard/);
+});
+
+test("OSC 52 submission retains selection and reports unconfirmed delivery rather than clipboard success", async (t) => {
+	const writes: string[] = [];
+	const copy = createTextCopier({ platform: "linux", env: {}, isTTY: true, write: async (text) => { writes.push(text); } });
+	const app = await fixture(t, 0, "copy-remote", copy);
+	const before = app.frame();
+	const y = before.findIndex((line) => line.includes("copy-remote"));
+	const x = before[y]!.indexOf("copy-remote");
+	pointer(app, "press", x, y); pointer(app, "drag", x + 10, y); pointer(app, "release", x + 10, y);
+	for (let index = 0; index < 4; index++) await Promise.resolve();
+	assert.deepEqual(writes, [`\x1b]52;c;${Buffer.from("copy-remote").toString("base64")}\x07`]);
+	assert.ok(highlightedRows(app).length > 0);
+	assert.match(app.frame().join("\n"), /unconfirmed/);
+	assert.doesNotMatch(app.frame().join("\n"), /copied to clipboard/);
+});
+
+test("keyboard answer copy uses the same clipboard facility and keeps the full unrendered answer", async (t) => {
+	const texts: string[] = [];
+	const answer = "```ts\nif (ok) {\n  run(界);\n}\n```\n\n**Done**";
+	const app = await fixture(t, 0, undefined, async (text) => { texts.push(text); return true; }, answer);
+	app.input("\t");
+	app.input("y");
+	for (let index = 0; index < 4; index++) await Promise.resolve();
+	assert.deepEqual(texts, [answer]);
+	assert.match(app.frame().join("\n"), /copied to clipboard/);
 });

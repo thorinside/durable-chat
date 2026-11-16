@@ -298,6 +298,23 @@ Command-click transcript URLs on macOS (Ctrl-click in terminals that use that mo
 in the default browser. Markdown links and bare URLs keep their complete destinations when wrapped.
 Clicks routed to the app also open web links; dragging across a link still selects text.
 
+Drag in the transcript to copy selected text; double-click copies a word, triple-click a line.
+Selection stays inside the transcript and excludes blank speaker gutters and right-side cell fill,
+while preserving code indentation, internal spaces and selected line breaks. Visible speaker labels
+are included when selected. Code blocks use source indentation without an extra decorative indent.
+This copies rendered lines, not byte-for-byte Markdown; `y` outside the composer copies the full
+answer instead. On local macOS (Apple Terminal, Ghostty, or tmux), both paths use the native clipboard
+writer, with `/usr/bin/pbcopy` as fallback. The highlight clears only after a successful local write.
+
+Over SSH, dchat never writes the remote Mac's clipboard. Other hosts and remote sessions use OSC 52,
+which depends on terminal clipboard permissions and, in tmux, passthrough configuration. Sending an
+escape sequence does **not** confirm delivery: dchat reports it as unconfirmed and retains selection.
+Apple Terminal does not support OSC 52. As a native-selection workaround, toggle **Allow Mouse
+Reporting** with **Command-R**, select text, copy with **Command-C**, then restore mouse reporting.
+Apple documents **Option-drag** as rectangular selection, not ordinary linear selection. Native
+selection copies screen cells and may include pane padding. See [copy verification](docs/transcript-copy.md)
+for limitations and opt-in manual checks.
+
 The terminal title includes the launch folder, for example `durable-chat — ~/projects/example`.
 The previous title is restored on startup failure or exit using the terminal's title stack.
 Folders outside home remain absolute. Allow program-controlled titles in your terminal; Ghostty's
