@@ -117,7 +117,12 @@ export class Dashboard implements Component {
 	private scroll = 0;
 	private jobsScroll: number | undefined;
 	private contextScroll = 0;
-	private targetConversationId: number | undefined;
+	/** Display state is independent of the composer/action target while browsing jobs. */
+	private displayTarget: Target = { kind: "main" };
+	private displayConversationId: number | undefined;
+	private previewJobId: number | undefined;
+	private displayLoad: Promise<boolean> | undefined;
+	private displayCancel: (() => void) | undefined;
 	private lastWidth = 120;
 	private toast: { text: string; kind: ToastKind; at: number } | undefined;
 	private actionLabel: string | undefined;
@@ -138,7 +143,8 @@ export class Dashboard implements Component {
 	private scanning = false;
 	private scanAgain = false;
 	private started = false;
-	private pinVersion = 0;
+	private stopping = false;
+	private displayVersion = 0;
 	private quitRequested = false;
 	private quitArmedAt: number | undefined;
 	private quitArmTimer: NodeJS.Timeout | undefined;
@@ -170,6 +176,7 @@ export class Dashboard implements Component {
 	}
 
 	async start(): Promise<void> {
+		this.stopping = false;
 		await this.main.start(this.runtime.context, this.runtime.config.contextWindow);
 		this.current = this.main;
 		await this.refreshJobs(true);
@@ -193,6 +200,9 @@ export class Dashboard implements Component {
 	async stop(): Promise<void> {
 		this.selection.reset();
 		this.started = false;
+		this.stopping = true;
+		this.displayVersion++;
+		this.displayCancel?.();
 		this.modelController?.abort();
 		this.modelVersion++;
 		this.disarmQuit();
@@ -267,83 +277,113 @@ export class Dashboard implements Component {
 	private applyView(): void {
 		const previous = this.visible;
 		this.visible = filterJobs(this.rowsAll, this.state.filter, this.state.showFinished);
-		const selected = reconcileJobSelection(this.visible, previous, this.state.target, this.state.selectedJobId);
+		// New arrivals must not move a row the user is currently reading.
+		const selectionTarget = this.previewJobId === undefined ? this.state.target : { kind: "job" as const, id: this.previewJobId };
+		const selected = reconcileJobSelection(this.visible, previous, selectionTarget, this.state.selectedJobId);
 		if (selected !== this.state.selectedJobId) this.jobsScroll = undefined;
 		this.state.selectedJobId = selected;
+		if (this.state.focus === "jobs" || this.previewJobId !== undefined) this.previewSelected();
+		else if (this.current === undefined) void this.showTarget(this.state.target);
+	}
+
+	private previewSelected(): void {
+		this.previewJobId = this.state.selectedJobId;
+		void this.showTarget(this.previewJobId === undefined ? this.state.target : { kind: "job", id: this.previewJobId });
+	}
+
+	private setFocus(focus: Focus): void {
+		this.state.focus = focus;
+		this.input.focused = focus === "composer";
+		if (focus === "jobs") this.previewSelected();
+		else if (focus === "composer") {
+			this.previewJobId = undefined;
+			void this.showTarget(this.state.target);
+		}
 	}
 
 	private async pinMain(): Promise<void> {
-		this.pinVersion++;
-		if (this.current !== undefined && this.current !== this.main) {
-			const old = this.current;
-			this.current = this.main;
-			void old.stop();
-		}
-		this.current = this.main;
+		this.previewJobId = undefined;
 		this.state.target = { kind: "main" };
 		this.state.selectedJobId = reconcileJobSelection(this.visible, [], this.state.target, this.state.selectedJobId);
-		this.targetConversationId = undefined;
 		this.scroll = 0;
-		this.jobsScroll = undefined;
 		this.contextScroll = 0;
-		this.renderSoon();
+		this.jobsScroll = undefined;
+		await this.showTarget(this.state.target);
 	}
 
 	private async pinJob(id: number): Promise<boolean> {
-		const version = ++this.pinVersion;
-		const row = this.rowsAll.find((item) => item.id === id);
+		this.previewJobId = undefined;
 		this.state.target = { kind: "job", id };
-		this.scroll = 0;
-		this.jobsScroll = undefined;
-		this.contextScroll = 0;
 		this.state.selectedJobId = id;
-		const conversationId = row?.conversationId ?? await jobConversationId(this.runtime.harness, id, this.runtime.context);
-		if (version !== this.pinVersion) return false;
-		this.targetConversationId = conversationId;
-		if (conversationId === undefined) {
-			const old = this.current;
-			this.current = undefined;
-			if (old !== undefined && old !== this.main) void old.stop();
-			this.flash(`job #${id} has no conversation yet`, "error");
-			this.renderSoon();
-			return false;
-		}
-		const conversation = await this.runtime.harness.conversation(conversationId as never, this.runtime.context);
-		if (version !== this.pinVersion) return false;
-		if (conversation === undefined) {
-			this.flash(`conversation #${conversationId} is unavailable`, "error");
-			this.renderSoon();
-			return false;
-		}
+		this.scroll = 0;
+		this.contextScroll = 0;
+		this.jobsScroll = undefined;
+		return this.showTarget(this.state.target);
+	}
+
+	/** Only the displayed transcript changes here; never the send/action destination. */
+	private showTarget(target: Target): Promise<boolean> {
+		if (this.stopping) return Promise.resolve(false);
+		const same = target.kind === this.displayTarget.kind
+			&& (target.kind === "main" || (this.displayTarget.kind === "job" && target.id === this.displayTarget.id));
+		if (same && this.displayLoad !== undefined) return this.displayLoad;
+		if (same && this.current !== undefined) return Promise.resolve(true);
+		const version = ++this.displayVersion;
+		this.displayCancel?.();
+		const cancellable = target.kind === "job" ? withCancel(this.runtime.context) : undefined;
+		this.displayCancel = cancellable?.cancel;
+		const context = cancellable?.context ?? this.runtime.context;
+		this.displayTarget = target;
+		this.displayConversationId = undefined;
 		const old = this.current;
-		const transcript = new Transcript(conversation);
-		transcript.onUpdate = () => this.renderSoon();
-		try {
-			await transcript.start(this.runtime.context, this.runtime.config.contextWindow);
-		} catch (error) {
-			await transcript.stop();
-			this.current = undefined;
-			this.flash(`could not read the job transcript: ${message(error)}`, "error");
-			this.renderSoon();
-			return false;
-		}
-		if (version !== this.pinVersion) {
-			void transcript.stop();
-			return false;
-		}
+		this.current = target.kind === "main" ? this.main : undefined;
 		if (old !== undefined && old !== this.main) void old.stop();
-		this.current = transcript;
+		this.selection.reset();
+		this.scroll = 0;
+		this.contextScroll = 0;
 		this.renderSoon();
-		return true;
+		const load = async (): Promise<boolean> => {
+			if (target.kind === "main") return true;
+			let transcript: Transcript | undefined;
+			try {
+				const row = this.rowsAll.find((item) => item.id === target.id);
+				const conversationId = row?.conversationId ?? await jobConversationId(this.runtime.harness, target.id, context);
+				if (version !== this.displayVersion) return false;
+				this.displayConversationId = conversationId;
+				if (conversationId === undefined) return false; // Retried on job refresh once startup creates it.
+				const conversation = await this.runtime.harness.conversation(conversationId as never, context);
+				if (version !== this.displayVersion) return false;
+				if (conversation === undefined) throw new Error(`conversation #${conversationId} is unavailable`);
+				transcript = new Transcript(conversation);
+				transcript.onUpdate = () => { if (version === this.displayVersion) this.renderSoon(); };
+				await transcript.start(context, this.runtime.config.contextWindow);
+				if (version !== this.displayVersion) {
+					await transcript.stop();
+					return false;
+				}
+				this.current = transcript;
+				return true;
+			} catch (error) {
+				await transcript?.stop();
+				if (version === this.displayVersion) this.flash(`could not read the job transcript: ${message(error)}`, "error");
+				return false;
+			}
+		};
+		this.displayLoad = load().finally(() => {
+			if (version === this.displayVersion) {
+				this.displayLoad = undefined;
+				this.renderSoon();
+			}
+		});
+		return this.displayLoad;
 	}
 
 	private async openSelected(): Promise<void> {
 		const id = this.state.selectedJobId;
 		if (id === undefined) return;
 		try {
-			if (await this.pinJob(id)) {
-				this.state.focus = "transcript";
-				this.input.focused = false;
+			if (await this.pinJob(id) && this.state.focus === "jobs" && this.state.selectedJobId === id && this.state.target.kind === "job" && this.state.target.id === id) {
+				this.setFocus("transcript");
 				this.renderSoon();
 			}
 		} catch (error) {
@@ -386,8 +426,7 @@ export class Dashboard implements Component {
 	private beginPrompt(mode: Exclude<UiMode, "help" | "inspector" | `confirm${string}`>): void {
 		this.state.mode = mode;
 		this.input.setValue("");
-		this.state.focus = "composer";
-		this.input.focused = true;
+		this.setFocus("composer");
 		this.renderSoon();
 	}
 
@@ -500,7 +539,7 @@ export class Dashboard implements Component {
 				this.runtime.harness.resume();
 				await this.refreshJobs();
 				await this.pinJob(Number(started.taskId));
-				this.state.focus = "transcript";
+				this.setFocus("transcript");
 				this.flash(
 					notifyError === undefined
 						? `job #${started.taskId} started`
@@ -690,7 +729,7 @@ export class Dashboard implements Component {
 				return;
 			case "tasks":
 				await this.refreshJobs();
-				this.state.focus = this.lastWidth >= 64 ? "jobs" : "transcript";
+				this.setFocus(this.lastWidth >= 64 ? "jobs" : "transcript");
 				if (this.lastWidth < 64) this.flash(`${this.visible.length} jobs: ${this.visible.map((row) => `#${row.id}`).join(", ") || "none"}`);
 				return;
 			case "task":
@@ -700,7 +739,7 @@ export class Dashboard implements Component {
 				const id = parseId(rawId);
 				if ((await jobRecord(this.runtime.harness, id, this.runtime.context))?.kind !== JOB_KIND) throw new Error(`No job #${id}.`);
 				if (!(await this.pinJob(id))) return;
-				this.state.focus = "transcript";
+				this.setFocus("transcript");
 				if (command === "cancel") this.requestCancel();
 				return;
 			}
@@ -886,8 +925,7 @@ export class Dashboard implements Component {
 		this.pendingResetHandoff = undefined;
 		this.state.mode = "reset";
 		this.input.setValue("");
-		this.state.focus = "composer";
-		this.input.focused = true;
+		this.setFocus("composer");
 		this.renderSoon();
 	}
 
@@ -964,7 +1002,7 @@ export class Dashboard implements Component {
 	}
 
 	private copy(): void {
-		const target = this.state.target;
+		const target = this.displayTarget;
 		let text = "";
 		if (target.kind === "job") {
 			const record = this.records.get(target.id);
@@ -1087,14 +1125,14 @@ export class Dashboard implements Component {
 	}
 
 	private renderTranscript(width: number, height: number): string[] {
-		const target = targetLabel(this.state.target);
+		const target = `${targetLabel(this.displayTarget)}${this.previewJobId === undefined ? "" : " (preview)"}`;
 		const live = this.current?.live;
 		const active = live?.generation !== undefined || live?.tools?.some((slot) => slot.status === "running") === true;
 		const title = `${bold("TRANSCRIPT")} ${dim(target)}${active ? fg("  ● live", GREEN) : ""}${this.scroll > 0 ? dim(`  ↑${this.scroll}`) : ""}`;
 		const lines = [truncateToWidth(title, width, "", true), ""];
 		const transcript = this.current;
 		if (transcript === undefined) {
-			lines.push(dim("  No conversation is available for this job yet."));
+			lines.push(dim(this.displayLoad === undefined ? "  No conversation is available for this job yet." : "  Loading job transcript…"));
 			return lines;
 		}
 		const contentHeight = Math.max(1, height - PANE_HEADING_ROWS);
@@ -1119,16 +1157,17 @@ export class Dashboard implements Component {
 	}
 
 	private contextLines(width: number): string[] {
-		const target = this.state.target;
+		const target = this.displayTarget;
 		const transcript = this.current;
 		const usage = usageTotals(transcript?.usage);
 		const live = transcript?.live as { run?: { turns?: number } } | undefined;
 		const rows: [string, string][] = [];
-		rows.push(["target", targetLabel(target)]);
+		rows.push(["target", targetLabel(this.state.target)]);
+		if (this.previewJobId !== undefined) rows.push(["preview", targetLabel(target)]);
 		if (target.kind === "job") {
 			const row = this.rowsAll.find((item) => item.id === target.id);
 			rows.push(["status", row?.status ?? "unknown"]);
-			const conversation = this.targetConversationId ?? row?.conversationId;
+			const conversation = this.displayConversationId ?? row?.conversationId;
 			rows.push(["conversation", conversation === undefined ? "…" : `#${conversation}`]);
 			rows.push(["brief", row?.brief ?? "(unknown)"]);
 			if (row?.tags?.length) rows.push(["tags", row.tags.join(", ")]);
@@ -1178,9 +1217,8 @@ export class Dashboard implements Component {
 		const focus = dim(`focus ${this.state.focus}`);
 		const contextTokens = this.current?.contextTokens;
 		const window = this.runtime.config.contextWindow;
-		const context = contextTokens === undefined
-			? "ctx …"
-			: `ctx ~${formatTokenCount(contextTokens)}/${formatTokenCount(window)}`;
+		const meter = contextTokens === undefined ? "ctx …" : `ctx ~${formatTokenCount(contextTokens)}/${formatTokenCount(window)}`;
+		const context = this.previewJobId === undefined ? meter : `preview ${meter}`;
 		const line = ` ${dim("target")} ${bold(target)}  ${focus}  ${dim(context)}${activity}`;
 		return truncateToWidth(line, width, "", true);
 	}
@@ -1305,7 +1343,7 @@ export class Dashboard implements Component {
 			`live jobs: ${this.rowsAll.filter((row) => row.live).length}`,
 			`context: ~${formatTokenCount(this.current?.contextTokens ?? 0)} / ${formatTokenCount(this.runtime.config.contextWindow)} ` +
 				`(compact at ~${formatTokenCount(compactionLimit(this.runtime.config.contextWindow))})`,
-			`target spend: ${formatTokenCount(usage.tokens)} tokens${usage.cost > 0 ? `, $${usage.cost.toFixed(4)}` : ""}`,
+			`${this.previewJobId === undefined ? "target" : "preview"} spend: ${formatTokenCount(usage.tokens)} tokens${usage.cost > 0 ? `, $${usage.cost.toFixed(4)}` : ""}`,
 			`job tools: ${this.runtime.jobExtensions.flatMap((extension) => extension.tools?.map((tool) => tool.name) ?? []).join(", ") || "(none)"}`,
 			...this.runtime.mcpNotes.slice(0, 8).map((note) => `mcp: ${note}`),
 			"",
@@ -1350,9 +1388,7 @@ export class Dashboard implements Component {
 	private cycleFocus(backwards: boolean): void {
 		const order: Focus[] = this.lastWidth < 64 ? ["composer", "transcript"] : ["composer", "jobs", "transcript"];
 		const index = Math.max(0, order.indexOf(this.state.focus));
-		this.state.focus = order[(index + (backwards ? order.length - 1 : 1)) % order.length]!;
-		this.input.focused = this.state.focus === "composer";
-		if (this.state.focus === "jobs" && this.state.selectedJobId === undefined) this.state.selectedJobId = this.visible[0]?.id;
+		this.setFocus(order[(index + (backwards ? order.length - 1 : 1)) % order.length]!);
 		this.renderSoon();
 	}
 
@@ -1498,8 +1534,7 @@ export class Dashboard implements Component {
 		}
 		if (matchesKey(data, "escape")) {
 			if (this.state.target.kind === "job") void this.pinMain();
-			this.state.focus = "composer";
-			this.input.focused = true;
+			this.setFocus("composer");
 			this.renderSoon();
 			return;
 		}
@@ -1507,21 +1542,25 @@ export class Dashboard implements Component {
 			this.jobsScroll = undefined;
 			if (matchesKey(data, "down") || data === "j") {
 				this.state.selectedJobId = moveSelection(this.visible, this.state.selectedJobId, 1);
+				this.previewSelected();
 				this.renderSoon();
 				return;
 			}
 			if (matchesKey(data, "up") || data === "k") {
 				this.state.selectedJobId = moveSelection(this.visible, this.state.selectedJobId, -1);
+				this.previewSelected();
 				this.renderSoon();
 				return;
 			}
 			if (data === "g") {
 				this.state.selectedJobId = this.visible[0]?.id;
+				this.previewSelected();
 				this.renderSoon();
 				return;
 			}
 			if (data === "G") {
 				this.state.selectedJobId = this.visible.at(-1)?.id;
+				this.previewSelected();
 				this.renderSoon();
 				return;
 			}
@@ -1599,8 +1638,7 @@ export class Dashboard implements Component {
 			return;
 		}
 		if (data === "s") {
-			this.state.focus = "composer";
-			this.input.focused = true;
+			this.setFocus("composer");
 			this.renderSoon();
 			return;
 		}
