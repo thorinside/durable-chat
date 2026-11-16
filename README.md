@@ -738,13 +738,39 @@ The supported subset is:
   Only load project configs you trust. Other client features such as OAuth/provider login,
   exposure settings, or legacy HTTP+SSE are not implemented by this loader.
 
-`~/.config/mcp/mcp.json` is **not** automatically discovered. To use a config at that location:
+The separate **pi-mcp-adapter** client documents `~/.config/mcp/mcp.json` as its preferred
+shared global convention, with `~/.agents/mcp.json` and `~/.agents/mcp/mcp.json` compatibility
+inputs and project `.mcp.json`. Its
+[pinned configuration documentation](https://github.com/nicobailon/pi-mcp-adapter/blob/1382423d353a06146f1b720631dccbfe81a1905d/docs/configuration.md#file-layout)
+distinguishes those files from Pi's own MCP files and adapter-owned `mcp-adapter.json` settings.
+That is a real adapter convention, not an MCP protocol requirement or dchat's discovery behavior.
+
+Dchat does **not** automatically discover those shared paths, `.mcp.json`, or `mcp-adapter.json`.
+To select a shared file explicitly:
 
 ```sh
 dchat config set mcp.config ~/.config/mcp/mcp.json
 # Or, for a single launch:
 DURABLE_MCP_CONFIG="$HOME/.config/mcp/mcp.json" dchat
 ```
+
+Dchat reads `~/.pi/agent/mcp.json`, then launch-directory `.pi/mcp.json`, then an explicitly
+selected `mcp.config`/`DURABLE_MCP_CONFIG` file if it is distinct from both. Later same-name entries
+replace the entire earlier entry; fields and credentials are not inherited. Selecting a shared
+file does not activate the adapter's other discovery or precedence rules. Unlike the adapter,
+dchat has **no project trust/approval prompt**: review `.pi/mcp.json` before launching in a project,
+because a selected stdio server can execute its configured command.
+
+The adapter's [server types](https://github.com/nicobailon/pi-mcp-adapter/blob/1382423d353a06146f1b720631dccbfe81a1905d/types.ts#L456-L468),
+[token resolver](https://github.com/nicobailon/pi-mcp-adapter/blob/1382423d353a06146f1b720631dccbfe81a1905d/utils.ts#L319-L324)
+and [HTTP auth wiring](https://github.com/nicobailon/pi-mcp-adapter/blob/1382423d353a06146f1b720631dccbfe81a1905d/server-manager.ts#L1696-L1734)
+confirm `auth: "bearer"`/`bearerToken` with literal or interpolated tokens. Dchat's shorthand
+supports that limited use case, **not full adapter compatibility**. Dchat deliberately preserves
+explicit Authorization headers over shorthand and rejects missing/whitespace bearer tokens;
+the adapter's wiring assigns Authorization from a resolved bearer token. Adapter features such as
+`bearerTokenEnv`, credential stores, `!command` secrets, OAuth/provider tokens, script tools,
+field-wise URL-bound merging, and trust/approval flows are not implemented here. Do not pass a
+whole adapter config to dchat assuming equivalent validation, execution or security behavior.
 
 There is no universal global config filename/schema established by the MCP protocol. The
 [MCP transport specification (2025-11-25)](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
