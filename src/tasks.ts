@@ -5,6 +5,7 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { withAbortSignal } from "@earendil-works/chord/context";
 import type { Context } from "@earendil-works/chord/context";
 import { ensureWorkspace, JobWorkspaceDoc, type JobWorkspace } from "./workspaces.ts";
+import { formatResultPage, resultPage } from "./result-pages.ts";
 
 export const JOB_KIND = "durable-chat.job";
 export const MAX_BRIEF_CHARS = 4000;
@@ -23,7 +24,6 @@ export const JOB_INSTRUCTIONS = [
 	"Inspect real files and live state instead of guessing. Make the smallest change that satisfies the brief.",
 	"Finish with a concise result: what you changed, what you verified, and anything still open. Never claim a check you did not run.",
 ].join("\n");
-const ANSWER_TAIL_CHARS = 6000;
 
 /** Legacy session index, read only so jobs created before JobLink can still resume. */
 export const JobsIndex = defineDoc<{ byTask: Record<string, { conversationId: number }> }>({
@@ -134,6 +134,8 @@ export type JobState =
 		status: "answered" | "unanswered";
 		answerEntry?: number;
 		answer?: string;
+		/** Absent on legacy tail-only checkpoints. */
+		answerComplete?: boolean;
 		reason?: string;
 	};
 
@@ -142,6 +144,8 @@ export type JobResult = {
 	brief: string;
 	status: "answered" | "unanswered" | "aborted" | "handed_off";
 	answer?: string;
+	/** True when the receipt contains the complete final response text. */
+	answerComplete?: boolean;
 	answerEntry?: number;
 	reason?: string;
 	handoff?: { target: "job" | "main"; id?: number };
@@ -149,10 +153,6 @@ export type JobResult = {
 
 function textOf(message: AssistantMessage | undefined): string {
 	return (message?.content ?? []).flatMap((part) => part.type === "text" ? [part.text] : []).join("");
-}
-
-function tailText(text: string): string {
-	return text.length <= ANSWER_TAIL_CHARS ? text : `[...answer truncated...]\n${text.slice(-ANSWER_TAIL_CHARS)}`;
 }
 
 async function linkOf(
@@ -270,7 +270,8 @@ export const JobTask = defineTask<JobInput, JobState, JobResult>({
 					phase: "report",
 					status: "answered",
 					answerEntry: Number(settled.answer),
-					answer: tailText(textOf(assistant.at(-1))),
+					answer: textOf(assistant.at(-1)),
+					answerComplete: true,
 				};
 			} else {
 				const reason = settled.status === "unanswered" ? String(settled.reason) : "not_answered";
@@ -339,6 +340,7 @@ export const JobTask = defineTask<JobInput, JobState, JobResult>({
 							brief: task.input.brief,
 							status: "handed_off" as const,
 							answer: summary,
+							answerComplete: true,
 							handoff: { target: "main" as const },
 						},
 					},
@@ -444,6 +446,7 @@ export const JobTask = defineTask<JobInput, JobState, JobResult>({
 							brief: task.input.brief,
 							status: "handed_off" as const,
 							answer: summary,
+							answerComplete: true,
 							handoff: { target: "job" as const, id: successorId },
 						},
 					},
@@ -458,7 +461,22 @@ export const JobTask = defineTask<JobInput, JobState, JobResult>({
 				? await runtime.conversation(runtime.conversationId, context)
 				: undefined;
 			const answered = checkpoint.status === "answered";
-			const summary = checkpoint.answer === undefined ? undefined : checkpoint.answer.slice(0, 800);
+			let answer = checkpoint.answer;
+			let answerComplete = checkpoint.answerComplete === true;
+			// A pre-pagination checkpoint may contain only the tail. Recover its source before notifying main.
+			if (!answerComplete && checkpoint.answerEntry !== undefined) {
+				const view = await runtime.context(conversationId as never, context);
+				const entry = view.entries.find((item) => Number(item.id) === checkpoint.answerEntry);
+				const assistant = (entry?.model ?? []).filter((message): message is AssistantMessage => message.role === "assistant").at(-1);
+				if (assistant !== undefined) {
+					answer = textOf(assistant);
+					answerComplete = true;
+				}
+			}
+			const incomplete = !answerComplete && answer?.startsWith("[...answer truncated...]") === true;
+			const summary = incomplete
+				? `Legacy result may be incomplete. Retrieve the original entry with task(${JSON.stringify({ action: "result", id: String(task.id) })}); do not treat this notice as a full response.`
+				: formatResultPage(resultPage(answer ?? checkpoint.reason ?? "", Number(task.id)));
 			const continueMain = task.input.autoContinue === true;
 			const continuation = continueMain
 				? " Continue the work: review the result, decide the next step, and tell the user what changed."
@@ -468,15 +486,14 @@ export const JobTask = defineTask<JobInput, JobState, JobResult>({
 			const workspace = task.input.workspace;
 			const placement = workspace === undefined ? "" : ` Workspace: ${workspace.cwd}${workspace.kind === "worktree" ? `; branch ${workspace.branch}; base ${workspace.baseCommit}` : " (shared)"}.`;
 			const text = (answered
-				? `Background job #${task.id} completed: "${task.input.brief}". ` +
-					`Answer: ${summary === undefined || summary.length === 0 ? "(no text)" : summary}.`
-				: `Background job #${task.id} failed: ${checkpoint.reason ?? "unknown"}.`) + provenance + placement + continuation;
+				? `Background job #${task.id} completed. `
+				: `Background job #${task.id} failed.`) + provenance + placement + continuation + `\n\n${summary}`;
 			const data = {
 				taskId: Number(task.id),
 				conversationId,
 				brief: task.input.brief,
 				phase: answered ? "completed" as const : "failed" as const,
-				...(summary === undefined ? {} : { summary }),
+				summary,
 			};
 			await runtime.commit(async (tx) => {
 				if (main !== undefined) {
@@ -501,7 +518,7 @@ export const JobTask = defineTask<JobInput, JobState, JobResult>({
 							result: {
 								...base,
 								status: "answered" as const,
-								...(checkpoint.answer === undefined ? {} : { answer: checkpoint.answer }),
+								...(answer === undefined ? {} : { answer, answerComplete: !incomplete }),
 								...(checkpoint.answerEntry === undefined ? {} : { answerEntry: checkpoint.answerEntry }),
 							},
 						},

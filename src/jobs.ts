@@ -21,6 +21,7 @@ export { JOB_INSTRUCTIONS };
 import type { ResolvedConfig } from "./config.ts";
 import { JobWorkspaceDoc, type JobWorkspace } from "./workspaces.ts";
 import { JobTags, normalizeTags, taggedJob, writeJobTags } from "./tags.ts";
+import { resultPage, type ResultPage } from "./result-pages.ts";
 
 export const MAIN_INSTRUCTIONS = [
 	"You coordinate durable background jobs for one user in a terminal.",
@@ -33,7 +34,8 @@ export const MAIN_INSTRUCTIONS = [
 	"To redirect a running job, call task with action steer, its id, and a message. This queues steering at the next boundary without waiting for the job; then answer the user and stop.",
 	"Jobs notify you automatically: [host] start/completion/failure/abort notices, and [job #N handoff] inputs from jobs that continue their work with you.",
 	"For a future check of a long-running external process, use reminder action schedule with an explicit timezone timestamp and a concrete next-step message, then answer and stop. When a host reminder wakes you through your normal inbox, check the stated process and decide the next step; the reminder is not evidence that the process finished. Reminders are one-shot and recover when the session next runs if offline.",
-	"Do not poll. Never call task list/show in a loop, and avoid calling them unless the user asks for status or a notice lacks a detail you need. A completion notice already contains the result summary.",
+	"Do not poll live jobs. Task list stays compact; show is for status or a specific detail. Completed responses are paged: a completion notice contains page 1, not a summary. If marked PAGED, use each exact next task result call until remainingPages is 0 before judging the full response. This is retrieval, not polling.",
+	"Task result reads immutable completed final response text, not the whole transcript. Pages use a UTF-8 bytes / 4 token estimate, not a tokenizer; small pages may also enforce byte/line caps. Preserve the revision in next calls. In codemode fetch one page per run and text(result.display); do not print an array of pages or lower max_output_tokens below 6000, or the script output cap may hide content. result.text is the exact unmodified page text for reassembly.",
 	"When a completion notice arrives, act on it: summarize the result, take the next concrete step, or say the work is complete. Do not start a job merely to keep working. If the user asks for status, one task list call is enough.",
 	"Treat [host] notices as status facts, not as the user speaking. A [job #N handoff] is a job handing its work to you; continue it.",
 	"Never claim work is done unless the notice or your own verified check says so. Keep replies short.",
@@ -264,6 +266,31 @@ export async function readAnswer(harness: Harness, entryId: number, context: Con
 		context,
 	);
 	return answerTextOfEntry(entry as { model?: readonly unknown[] } | undefined);
+}
+
+/** Read the immutable receipt, recovering pre-pagination jobs from the original answer entry. */
+export async function readJobResultPage(
+	harness: Pick<Harness, "commit">,
+	record: AnyTaskRecord,
+	context: Context,
+	page = 1,
+	revision?: string,
+): Promise<ResultPage> {
+	if (record.kind !== JOB_KIND) throw new Error(`No job #${record.id}.`);
+	if (record.state.status !== "terminal") throw new Error(`Job #${record.id} is still live; result pages are available only after completion. Wait for its completion notice; do not poll.`);
+	const outcome = record.state.outcome as { result?: JobResult; error?: { message?: string }; reason?: string };
+	const result = outcome.result;
+	let text: string | undefined;
+	if (result?.answerEntry !== undefined) {
+		const entry = await harness.commit((tx) => tx.entry(result.answerEntry as EntryId), context);
+		const assistant = (entry?.model ?? []).filter((message): message is AssistantMessage => message.role === "assistant").at(-1);
+		if (assistant !== undefined) text = assistant.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+	}
+	if (text === undefined) {
+		if (result?.answerComplete !== true && result?.answer?.startsWith("[...answer truncated...]")) throw new Error("The legacy receipt is truncated and its full answer entry is unavailable. Cannot return a complete result.");
+		text = result?.answer ?? result?.reason ?? outcome.error?.message ?? outcome.reason ?? "";
+	}
+	return resultPage(text, Number(record.id), page, revision);
 }
 
 export type SendResult = { status: "answered"; answer?: string } | { status: "unanswered"; reason: string };
