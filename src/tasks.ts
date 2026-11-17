@@ -1,4 +1,3 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { configure, defineDoc, defineTask } from "@earendil-works/pi-durable";
 import type { DocumentReader, EntryDraft, ModelRef } from "@earendil-works/pi-durable";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
@@ -6,6 +5,7 @@ import { withAbortSignal } from "@earendil-works/chord/context";
 import type { Context } from "@earendil-works/chord/context";
 import { ensureWorkspace, JobWorkspaceDoc, type JobWorkspace } from "./workspaces.ts";
 import { formatResultPage, resultPage } from "./result-pages.ts";
+import { answerTextOfEntry, completeAnswer } from "./job-answers.ts";
 
 export const JOB_KIND = "durable-chat.job";
 export const MAX_BRIEF_CHARS = 4000;
@@ -151,10 +151,6 @@ export type JobResult = {
 	handoff?: { target: "job" | "main"; id?: number };
 };
 
-function textOf(message: AssistantMessage | undefined): string {
-	return (message?.content ?? []).flatMap((part) => part.type === "text" ? [part.text] : []).join("");
-}
-
 async function linkOf(
 	read: DocumentReader,
 	taskId: number,
@@ -260,18 +256,18 @@ export const JobTask = defineTask<JobInput, JobState, JobResult>({
 					? { phase: "handoffMain", brief: handoff.brief, summary: handoff.summary }
 					: { phase: "handoffJob", brief: handoff.brief, summary: handoff.summary };
 			} else if (settled.status === "done" && settled.type === "input") {
-				// The answer is in the child conversation, not in the task's own (main) conversation.
-				const view = await runtime.context(conversationId as never, context);
-				const entry = view.entries.find((item) => Number(item.id) === Number(settled.answer));
-				const assistant = (entry?.model ?? []).filter(
-					(message): message is AssistantMessage => message.role === "assistant",
-				);
+				// A reset/compaction can remove the answer from active context after settlement.
+				// Read its immutable child entry, not runtime.entry() (scoped to main).
+				let answer: string | undefined;
+				await runtime.commit(async (tx) => {
+					answer = answerTextOfEntry(await tx.entry(settled.answer), conversationId);
+				}, context);
 				checkpoint = {
 					phase: "report",
 					status: "answered",
 					answerEntry: Number(settled.answer),
-					answer: textOf(assistant.at(-1)),
-					answerComplete: true,
+					...(answer === undefined ? {} : { answer }),
+					answerComplete: answer !== undefined,
 				};
 			} else {
 				const reason = settled.status === "unanswered" ? String(settled.reason) : "not_answered";
@@ -462,20 +458,21 @@ export const JobTask = defineTask<JobInput, JobState, JobResult>({
 				: undefined;
 			const answered = checkpoint.status === "answered";
 			let answer = checkpoint.answer;
-			let answerComplete = checkpoint.answerComplete === true;
-			// A pre-pagination checkpoint may contain only the tail. Recover its source before notifying main.
-			if (!answerComplete && checkpoint.answerEntry !== undefined) {
-				const view = await runtime.context(conversationId as never, context);
-				const entry = view.entries.find((item) => Number(item.id) === checkpoint.answerEntry);
-				const assistant = (entry?.model ?? []).filter((message): message is AssistantMessage => message.role === "assistant").at(-1);
-				if (assistant !== undefined) {
-					answer = textOf(assistant);
+			let answerComplete = completeAnswer(answer, checkpoint.answerComplete);
+			// Recover legacy tails (and old false-empty checkpoints) from immutable history.
+			if (checkpoint.answerEntry !== undefined) {
+				let source: string | undefined;
+				await runtime.commit(async (tx) => {
+					source = answerTextOfEntry(await tx.entry(checkpoint.answerEntry as never), conversationId);
+				}, context);
+				if (source !== undefined) {
+					answer = source;
 					answerComplete = true;
 				}
 			}
-			const incomplete = !answerComplete && answer?.startsWith("[...answer truncated...]") === true;
+			const incomplete = answered && !answerComplete;
 			const summary = incomplete
-				? `Legacy result may be incomplete. Retrieve the original entry with task(${JSON.stringify({ action: "result", id: String(task.id) })}); do not treat this notice as a full response.`
+				? `Result may be incomplete or unavailable. Retrieve the original entry with task(${JSON.stringify({ action: "result", id: String(task.id) })}); do not treat this notice as a full response.`
 				: formatResultPage(resultPage(answer ?? checkpoint.reason ?? "", Number(task.id)));
 			const continueMain = task.input.autoContinue === true;
 			const continuation = continueMain
@@ -518,7 +515,8 @@ export const JobTask = defineTask<JobInput, JobState, JobResult>({
 							result: {
 								...base,
 								status: "answered" as const,
-								...(answer === undefined ? {} : { answer, answerComplete: !incomplete }),
+								...(answer === undefined ? {} : { answer }),
+								answerComplete,
 								...(checkpoint.answerEntry === undefined ? {} : { answerEntry: checkpoint.answerEntry }),
 							},
 						},

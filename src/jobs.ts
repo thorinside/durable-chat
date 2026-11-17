@@ -13,7 +13,7 @@ import type {
 	TaskId,
 	Tx,
 } from "@earendil-works/pi-durable";
-import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { Context } from "@earendil-works/chord/context";
 import type { AnyTaskRecord } from "./format.ts";
 import { JobLink, JobTask, JOB_INSTRUCTIONS, JOB_KIND, MAX_BRIEF_CHARS, jobNoticeEntry, type ForkOrigin, type JobResult, type JobState, type JobTemplate } from "./tasks.ts";
@@ -22,6 +22,8 @@ import type { ResolvedConfig } from "./config.ts";
 import { JobWorkspaceDoc, type JobWorkspace } from "./workspaces.ts";
 import { JobTags, normalizeTags, taggedJob, writeJobTags } from "./tags.ts";
 import { resultPage, type ResultPage } from "./result-pages.ts";
+import { answerTextOfEntry, completeAnswer } from "./job-answers.ts";
+export { answerTextOfEntry } from "./job-answers.ts";
 
 export const MAIN_INSTRUCTIONS = [
 	"You coordinate durable background jobs for one user in a terminal.",
@@ -250,16 +252,6 @@ export async function findJobConversation(
 	return harness.conversation(conversationId as unknown as ConversationId, context);
 }
 
-export function answerTextOfEntry(entry: { model?: readonly unknown[] } | undefined): string | undefined {
-	const assistant = (entry?.model ?? []).filter(
-		(message): message is AssistantMessage => typeof message === "object" && message !== null && (message as { role?: unknown }).role === "assistant",
-	);
-	const text = (assistant.at(-1)?.content ?? [])
-		.flatMap((part) => part.type === "text" ? [part.text] : [])
-		.join("");
-	return text.trim().length === 0 ? undefined : text;
-}
-
 export async function readAnswer(harness: Harness, entryId: number, context: Context): Promise<string | undefined> {
 	const entry = await harness.commit(
 		(tx) => tx.entry(entryId as unknown as EntryId),
@@ -283,11 +275,11 @@ export async function readJobResultPage(
 	let text: string | undefined;
 	if (result?.answerEntry !== undefined) {
 		const entry = await harness.commit((tx) => tx.entry(result.answerEntry as EntryId), context);
-		const assistant = (entry?.model ?? []).filter((message): message is AssistantMessage => message.role === "assistant").at(-1);
-		if (assistant !== undefined) text = assistant.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+		text = answerTextOfEntry(entry, result.conversationId);
 	}
 	if (text === undefined) {
-		if (result?.answerComplete !== true && result?.answer?.startsWith("[...answer truncated...]")) throw new Error("The legacy receipt is truncated and its full answer entry is unavailable. Cannot return a complete result.");
+		if (result?.answer?.startsWith("[...answer truncated...]") && result.answerComplete !== true) throw new Error("The legacy receipt is truncated and its full answer entry is unavailable. Cannot return a complete result.");
+		if ((result?.status === "answered" || result?.answer !== undefined) && !completeAnswer(result.answer, result.answerComplete)) throw new Error("The full answer entry is unavailable and the receipt is not known to be complete. Cannot return a complete result.");
 		text = result?.answer ?? result?.reason ?? outcome.error?.message ?? outcome.reason ?? "";
 	}
 	return resultPage(text, Number(record.id), page, revision);

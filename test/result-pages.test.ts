@@ -4,14 +4,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { createRegistry, defineExtension, Harness } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTask, Harness } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { formatResultPage, resultPage } from "../src/result-pages.ts";
 import { createJobInCommit, MAIN_INSTRUCTIONS, readJobResultPage } from "../src/jobs.ts";
-import { JobTask } from "../src/tasks.ts";
+import { JobHandoffDoc, JobTask } from "../src/tasks.ts";
 import { createTaskExtension } from "../src/tool.ts";
 import { openCodemode } from "../src/codemode.ts";
 import type { AnyTaskRecord } from "../src/format.ts";
@@ -150,6 +150,17 @@ test("full job results and first-page notices survive restart and remain retriev
 	assert.deepEqual(await readJobResultPage(session.harness, legacy, context), first);
 	const missing = { ...legacy, state: { ...legacy.state, outcome: { ...receipt.state.outcome, result: { answer: "[...answer truncated...]\nlost", answerEntry: 999999 } } } } as AnyTaskRecord;
 	await assert.rejects(readJobResultPage(session.harness, missing, context), /full answer entry is unavailable/);
+	const worker = (await session.harness.conversation(started.conversationId, context))!;
+	const workerEntries = await worker.entries({ order: "ascending" }, 100, undefined, context);
+	const userEntry = workerEntries.items.find((entry) => entry.model?.some((message) => message.role === "user"))!;
+	const mainEntries = await session.root.entries({ order: "descending" }, 100, undefined, context);
+	const foreignAnswer = mainEntries.items.find((entry) => entry.model?.some((message) => message.role === "assistant"))!;
+	assert.ok(userEntry && foreignAnswer);
+	// Neither a non-assistant source nor another conversation's answer may certify a legacy tail.
+	for (const answerEntry of [userEntry.id, foreignAnswer.id]) {
+		const invalidSource = { ...legacy, state: { ...legacy.state, outcome: { ...receipt.state.outcome, result: { ...legacy.state.outcome.result, answerEntry } } } } as AnyTaskRecord;
+		await assert.rejects(readJobResultPage(session.harness, invalidSource, context), /full answer entry is unavailable/);
+	}
 	const live = { ...record, state: { status: "running", checkpoint: { phase: "run" } } } as AnyTaskRecord;
 	await assert.rejects(readJobResultPage(session.harness, live, context), /still live/);
 	const tool = session.tasks.tools!.find((tool) => tool.name === "task")!;
@@ -167,4 +178,140 @@ test("full job results and first-page notices survive restart and remain retriev
 	for (const args of [{ action: "result", id: "0" }, { action: "result", id: "999999" }, { action: "result", id: String(started.taskId), page: 0 }, { action: "show", id: String(started.taskId), page: 2 }]) {
 		assert.equal((await tool.execute(args as never, session.harness as never, context)).isError, true);
 	}
+});
+
+// The restart test above resets neither context nor a live report checkpoint. Gate the actual
+// settled -> extraction boundary (or legacy report boundary) so reset deterministically wins.
+test("reset between settlement and extraction preserves full receipts, completion pages and legacy recovery", { timeout: 20_000 }, async (t) => {
+	const long = "START\n" + "x".repeat(25000) + "\nEND \t\n";
+	for (const scenario of [
+		{ name: "settled immutable answer after reset", source: long, legacy: false },
+		{ name: "legacy report recovers immutable answer after reset and restart", source: long, legacy: true },
+		{ name: "old false-empty report is repaired from its immutable answer", source: long, legacy: true, falseEmpty: true },
+		{ name: "missing answer source cannot produce an empty complete receipt or notice", source: long, legacy: true, missing: "absent" },
+		{ name: "missing legacy source preserves the saved tail without certifying it complete", source: long, legacy: true, missing: "tail" },
+		{ name: "valid empty answer after reset", source: "", legacy: false },
+		{ name: "valid whitespace answer after reset", source: " \t\n", legacy: false },
+	]) await t.test(scenario.name, async (t) => {
+		const dir = mkdtempSync(join(tmpdir(), "dchat-result-reset-"));
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let armed = true;
+		const closes: (() => Promise<void>)[] = [];
+		t.after(async () => {
+			release.resolve();
+			for (const close of closes.reverse()) await close();
+			rmSync(dir, { recursive: true, force: true });
+		});
+		async function gate(signal: AbortSignal) {
+			armed = false;
+			entered.resolve();
+			const aborted = Promise.withResolvers<void>();
+			const onAbort = () => aborted.resolve();
+			signal.addEventListener("abort", onAbort, { once: true });
+			try { await Promise.race([release.promise, aborted.promise]); }
+			finally { signal.removeEventListener("abort", onAbort); }
+		}
+		const real = JobTask.definition;
+		const controlled = defineTask({
+			...real,
+			phases: {
+				...real.phases,
+				run: async (task, runtime, callContext) => {
+					const wrapped = new Proxy(runtime, {
+						get(target, key) {
+							if (key === "snapshot") return async (...args: Parameters<typeof runtime.snapshot>) => {
+								// JobTask reads this doc immediately after submission.wait() returns.
+								if (!scenario.legacy && armed && args[0] === JobHandoffDoc) await gate(runtime.signal);
+								return Reflect.apply(target.snapshot, target, args);
+							};
+							if (key === "commit" && scenario.legacy) return (change, ctx) => target.commit(async (tx, current) => {
+								const next = await change(tx, current);
+								if (next?.checkpoint?.phase === "report" && next.checkpoint.status === "answered") {
+									return { ...next, checkpoint: {
+										...next.checkpoint,
+										answerComplete: scenario.falseEmpty ? true : undefined,
+										answer: scenario.missing === "absent" ? undefined : scenario.falseEmpty ? "" : "[...answer truncated...]\n" + scenario.source.slice(-6000),
+										...(scenario.missing ? { answerEntry: 999999 } : {}),
+									} };
+								}
+								return next;
+							}, ctx);
+							return Reflect.get(target, key);
+						},
+					});
+					await real.phases.run(task, wrapped, callContext);
+				},
+				report: async (task, runtime, callContext) => {
+					if (scenario.legacy && armed) await gate(runtime.signal);
+					if (!runtime.signal.aborted) await real.phases.report(task, runtime, callContext);
+				},
+			},
+		});
+		async function open() {
+			const faux = fauxProvider(); // Offline, immediate response; gates control ordering, not time.
+			faux.setResponses([fauxAssistantMessage(scenario.source)]);
+			const models = createModels(); models.setProvider(faux.provider);
+			const model = { provider: faux.getModel().provider, modelId: faux.getModel().id };
+			const registry = createRegistry();
+			registry.install(defineExtension({ name: "jobs", tasks: [controlled] }));
+			const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "store.sqlite")), { models, registry, now: () => 1000 }, context);
+			const root = await harness.root(context);
+			let closed = false;
+			const close = async () => { if (!closed) { closed = true; await harness.close(context); } };
+			closes.push(close);
+			return { harness, root, model, close };
+		}
+		let session = await open();
+		const started = await session.root.commit((tx) => createJobInCommit(tx, "worker", session.model, [], dir, {
+			maxTurns: 20, thinkingLevel: "off", notifyMain: true, autoContinue: false,
+		}), context);
+		await Promise.race([entered.promise, session.harness.waitForTask(started.taskId, context).then((task) => { throw new Error(`Job ended before gate: ${JSON.stringify(task.state)}`); })]);
+		const worker = (await session.harness.conversation(started.conversationId, context))!;
+		const before = await worker.context(context);
+		const answerEntry = before.entries.findLast((entry) => entry.model?.some((message) => message.role === "assistant"))!;
+		assert.ok(answerEntry);
+		await worker.reset(undefined, context);
+		assert.ok(!(await worker.context(context)).entries.some((entry) => entry.id === answerEntry.id));
+		if (scenario.legacy) {
+			const pending = (await session.harness.getTask(started.taskId, context))!;
+			assert.equal(pending.state.checkpoint.phase, "report");
+			if (!scenario.falseEmpty && !scenario.missing) assert.match(pending.state.checkpoint.answer, /^\[\.\.\.answer truncated\.\.\.\]/);
+			// Close aborts only this invocation; the persisted report must recover on reopen.
+			await session.close();
+			session = await open();
+		} else release.resolve();
+		const receipt = await session.harness.waitForTask(started.taskId, context);
+		assert.equal(receipt.state.outcome.status, "completed");
+		assert.equal(receipt.state.outcome.result.answer, scenario.missing === "absent" ? undefined : scenario.missing === "tail" ? "[...answer truncated...]\n" + scenario.source.slice(-6000) : scenario.source);
+		assert.equal(receipt.state.outcome.result.answerComplete, !scenario.missing);
+		assert.equal(receipt.state.outcome.result.answerEntry, scenario.missing ? 999999 : Number(answerEntry.id));
+		const first = resultPage(scenario.source, Number(started.taskId));
+		const entries = await session.root.entries({ order: "ascending" }, 100, undefined, context);
+		const notice = entries.items.find((entry) => entry.kind === "app.job-notice" && (entry.data as { phase: string }).phase === "completed");
+		assert.ok(notice);
+		if (scenario.missing) {
+			assert.match((notice.data as { summary: string }).summary, /incomplete or unavailable/);
+			assert.doesNotMatch((notice.data as { summary: string }).summary, /COMPLETE result|End of stored response/);
+			await assert.rejects(readJobResultPage(session.harness, receipt, context), /Cannot return a complete result/);
+			return;
+		}
+		assert.equal((notice.data as { summary: string }).summary, formatResultPage(first));
+		if (scenario.source === long) {
+			assert.ok(first.nextCall);
+			assert.match((notice.data as { summary: string }).summary, /PAGED result: page 1\/2/);
+			assert.doesNotMatch((notice.data as { summary: string }).summary, /COMPLETE result/);
+		}
+		await session.close();
+		session = await open();
+		const record = (await session.harness.getTask(started.taskId, context))!;
+		let page = await readJobResultPage(session.harness, record, context);
+		assert.deepEqual(page, first);
+		let assembled = page.text;
+		while (page.nextCall !== undefined) {
+			page = await readJobResultPage(session.harness, record, context, page.nextCall.page, page.nextCall.revision);
+			assembled += page.text;
+		}
+		assert.equal(assembled, scenario.source);
+	});
 });
