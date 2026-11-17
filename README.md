@@ -66,6 +66,34 @@ the normal lock error. If Ghostty cannot focus the terminal, or Automation permi
 the original error is shown. This uses Ghostty's `macos-applescript` support (enabled by default);
 macOS may ask for Automation permission on the first use.
 
+## ACP attachment to an already-running Main
+
+An open dchat runtime exposes only Main through a user-private Unix socket. The
+lightweight frontend uses the same effective configuration/database selection as
+normal dchat; it never opens another runtime, launches dchat, or forks state:
+
+```sh
+dchat acp                 # standard ACP JSON-RPC over stdio; normally started by the runner
+# Explicit configuration is also supported:
+dchat acp --config /absolute/path/to/config.yaml
+```
+
+Start the ordinary TUI/plain owner first. No existing owner means unavailable,
+not auto-start. Multiple instances may own different databases; cwd alone is not
+instance identity. Main input/output, reported tools, and Main's normal job notices
+are shared with the terminal. Job conversations cannot be listed or addressed by ACP.
+Remote input uses native follow-up ordering. Disconnecting a frontend only detaches;
+Stop Main cancels Main and queued input from either interface while background jobs survive.
+
+This is an attach-only ACP v1 profile: use advertised `session/list` and `session/load`
+for complete replay. `session/resume` is not advertised in this first slice.
+`session/new`, client-supplied MCP servers and
+changes to the existing owner's model/instructions are refused explicitly. It is not
+claimed to satisfy every general ACP client's new-session/MCP expectations. Shared-Main
+metadata and request correlation are defined by `src/acp.ts`; no custom content RPC
+methods or ACP network listener are introduced. Existing tool/terminal permissions
+remain unchanged; the frontend never approves on the user's behalf.
+
 ## Future wake-ups
 
 Main can use its `reminder` tool to schedule a one-shot check of a long-running process,

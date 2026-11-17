@@ -15,6 +15,7 @@ import { createRepositoryInstructions } from "./agent-instructions.ts";
 import { jobEnvironment } from "./workspaces.ts";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { serveMain } from "./acp.ts";
 import { resolveConfig, parseThinkingLevel, type ProviderEntry, type ResolvedConfig } from "./config.ts";
 import { PiAuthStore } from "./auth.ts";
 import { createFauxResponder } from "./faux.ts";
@@ -247,6 +248,7 @@ async function openConfiguredRuntime(
 	let mcp: McpSetup | undefined;
 	let codemode: CodemodeSetup | undefined;
 	let harness: Harness | undefined;
+	let closeAcp: (() => Promise<void>) | undefined;
 	let storage: Awaited<ReturnType<typeof openNodeSqliteStorage>> | undefined;
 	try {
 		const setup = setupProviders(config);
@@ -331,7 +333,7 @@ async function openConfiguredRuntime(
 		const close = (release: boolean): Promise<void> => {
 			closing ??= (async () => {
 				try {
-					await harness?.close(context);
+					try { await closeAcp?.(); } finally { await harness?.close(context); }
 				} finally {
 					try { await mcp?.close(); }
 					finally { try { await codemode?.close(); } finally { if (release) releaseLock(); } }
@@ -452,6 +454,8 @@ async function openConfiguredRuntime(
 			rollback: (source) => replace(source),
 			close: () => close(true),
 		};
+		// ACP uses Unix user-private sockets; ordinary dchat remains usable on other platforms.
+		if (process.getuid) closeAcp = await serveMain(app);
 		return app;
 	} catch (error) {
 		try {

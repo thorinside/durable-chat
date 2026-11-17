@@ -337,6 +337,11 @@ async function main(): Promise<void> {
 		}
 		return;
 	}
+	if (command === "acp") {
+		const { acpFrontend } = await import("./acp.ts");
+		await acpFrontend({ ...(values.store === undefined ? {} : { store: values.store }), ...(values.config === undefined ? {} : { configPath: values.config }) });
+		return;
+	}
 	const noMcp = values["no-mcp"] === true;
 	const readOnly = command === "tasks"
 		|| (command === "task" && (sub === "show" || sub === "log" || sub === "get" || (sub !== undefined && /^[0-9]+$/.test(sub))));
