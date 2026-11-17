@@ -623,7 +623,7 @@ The TUI design and its implementation notes are in [docs/tui-design.md](docs/tui
 
 ## What each agent can do
 
-**Main agent** — `task` (`create`, `list`, `show`, `tag`, `steer`) and `fork`. It primes context through scouting jobs,
+**Main agent** — `task` (`create`, `list`, `show`, `result`, `tag`, `steer`) and `fork`. It primes context through scouting jobs,
 creates fresh jobs or context-forked variants, redirects running jobs, and waits for native notices instead of polling.
 
 ```javascript
@@ -661,6 +661,47 @@ scripts can call `task` and `fork` while job scripts keep the coding tools and t
 - `store()`/`load()` keep small JSON per conversation, and a fork sees them as of its fork point.
 - Tool `control` applies only to model-issued calls, so the anti-poll guard in the task tool returns
   its text to a script but cannot end a run started by one.
+
+### Complete job response pages
+
+The durable receipt now keeps the **entire final text response** instead of a 6,000-character tail.
+Completion notices deliver page 1, not an 800-character summary. A `PAGED` suffix gives the remaining
+page/byte counts, estimated remaining tokens, and the **exact next tool call**, including its revision.
+Follow those calls until `remainingPages` is zero before reviewing the whole response. Reading settled
+pages is retrieval, not status polling; `list` remains compact and never includes response bodies.
+
+Main's `task({ action: "show", id: "13" })` returns status and the first response page once a job is
+terminal. `task({ action: "result", id: "13" })` also starts at page 1. Later pages require `page` (a
+positive integer) and the `revision` copied from the preceding page. Invalid/out-of-range pages and
+revision mismatches return errors; no pages are silently skipped. The revision and boundaries are
+stable across restarts and repeated reads of the same completed response. Live jobs explicitly reject
+`result`: wait for their completion notice rather than combining pages of changing output.
+
+Each page holds up to **~5,000 estimated tokens** using `ceil(UTF-8 bytes / 4)`, **not a tokenizer or a
+true token upper bound**. A 20,000-byte and 1,400-newline content budget leaves room for the paging
+suffix under native tool caps (50 KiB / 2,000 lines). Code, long lines, non-ASCII and whitespace are
+preserved exactly; boundaries never split a surrogate pair. Pages can be smaller to meet the line
+budget. No model-independent exact token count is claimed.
+
+In codemode, the `task` result is a string for ordinary actions, or a page object for completed
+`show`/`result`. Print **one page's `display` per script**, using the default 10,000 output-token budget
+(or at least 6,000); batching displays or reducing the script budget can trigger codemode's own
+truncation. For exact programmatic reassembly concatenate the structured `text` fields in page order,
+not the display wrappers. The object also includes `page`, `totalPages`, `remainingPages`, `revision`,
+UTF-16 `start`/`end` offsets, `totalBytes`, `remainingBytes`, `remainingEstimatedTokens`, and optional
+`nextCall` arguments:
+
+```javascript
+const result = await tools.task({ action: "result", id: "13" });
+text(result.display); // suffix supplies the next call; fetch it in the next script
+```
+
+This retrieves the final response, **not** thinking, images, or the whole job transcript. A handoff's
+stored response is its handoff summary; failed/aborted receipts expose their recorded reason when
+there is no answer. Pre-pagination completed jobs recover the full response from `answerEntry` when
+available. If that entry is gone and only a known truncated legacy tail remains, retrieval reports
+that limitation instead of presenting the tail as a complete response. CLI/TUI transcript and detail
+views remain separate inspection surfaces; their presentation previews are not the paging source.
 
 ## Context forks (main-only)
 
