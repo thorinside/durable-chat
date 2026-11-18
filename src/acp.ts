@@ -270,13 +270,30 @@ export async function serveMain(
 				},
 			});
 		};
-		const attach = async () => {
+		const stopObserving = () => {
 			detach?.();
+			detach = undefined;
+		};
+		const attach = async () => {
+			stopObserving();
+			// A reload replaces the stream; until it completes, this socket has no loaded Main.
+			loaded = false;
 			loading = true;
 			pendingViews = [];
 			seen.clear();
 			chunks.clear();
 			toolIds.clear();
+			try {
+				await replay();
+			} catch (error) {
+				// A failed replay must not keep observing and buffering views nobody will receive.
+				stopObserving();
+				loading = false;
+				pendingViews = [];
+				throw error;
+			}
+		};
+		const replay = async () => {
 			const observation = await runtime.harness.observeConversation(
 				runtime.root.id,
 				{
