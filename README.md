@@ -113,7 +113,14 @@ dchat acp serve --sessions-dir /absolute/private/acp-sessions \
   `~/.local/share/durable-chat/acp`. Existing registry directories must be private
   (0700) and user-owned. Only one host can own a registry at a time; choose a
   different `--sessions-dir` for an independent host. `--store`/`--endpoint` are
-  attach-only flags, rejected by serve.
+  attach-only flags, rejected by serve. Registry admission holds an exclusive
+  SQLite transaction on the permanent `registry-lock.sqlite` file (local
+  filesystems with SQLite locking only). Ownership is released by closing the
+  connection or process death, not by deleting a PID file; crash restart needs
+  no stale-lock cleanup. Never remove/replace that file while any host is live.
+  Native store locks are unchanged. Pre-fix development builds used
+  `registry.lock`: if present, startup fails closed. Stop all old hosts before
+  removing that legacy marker offline; do not mix old/new hosts on one registry.
 - Existing agent config, environment and native auth (including `dchat config
   login`) select credentials/providers; Zed secrets are not a new auth mechanism.
   `--config` is explicit; otherwise each session's cwd selects its folder-local

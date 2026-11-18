@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type { ConversationView, EntryRecord } from "@earendil-works/pi-durable";
 import { entryUpdates, readFrames, type AcpMessage } from "./acp.ts";
-import { acquireStoreLock, openRuntime, type AppRuntime } from "./harness.ts";
+import { openRuntime, type AppRuntime } from "./harness.ts";
+import { acquireRegistryLock } from "./acp-registry-lock.ts";
 import type { McpServerEntry } from "./mcp.ts";
 import { PACKAGE_VERSION } from "./version.ts";
 
@@ -76,7 +77,7 @@ export async function acpServe(options: {
 	const directory = resolve(options.sessionsDir ?? defaultSessionsDirectory());
 	privateDirectory(directory);
 	// Serialize registry mutation across hosts, not just stores; no daemon or IPC owner socket.
-	const release = acquireStoreLock(join(directory, "registry"));
+	const release = acquireRegistryLock(directory);
 	const sessions = new Map<string, Session>();
 	let initialized = false;
 	let closing = false;

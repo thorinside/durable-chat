@@ -1,10 +1,10 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Source CLI coverage uses a real Harness, but no inherited credentials, config, stores or MCP.
 const root = mkdtempSync("/tmp/dchat-acp-serve-");
@@ -78,6 +78,16 @@ function host(t: TestContext, setup: ReturnType<typeof fixture>, extra: string[]
 		for (const name of readdirSync(setup.sessionsDir).filter((name) => name.startsWith("acp-"))) assert.equal(existsSync(join(setup.sessionsDir, name, "state.sqlite.lock")), false);
 	};
 	return { child, frames, wait, request, ok, notify, stop, exited, diagnostics: () => ({ stderr, stdout }) };
+}
+// Observe the actual OS stop, not just a marker written before SIGSTOP. Each ps
+// completion is an external event; the deadline bounds a failed child operation.
+async function stopped(pid: number): Promise<void> {
+	const deadline = Date.now() + 15_000;
+	while (Date.now() < deadline) {
+		const state = await new Promise<string>((resolve, reject) => execFile("/bin/ps", ["-o", "stat=", "-p", String(pid)], { timeout: 1000 }, (error, stdout) => error ? reject(error) : resolve(stdout)));
+		if (state.includes("T")) return;
+	}
+	throw new Error("Child did not stop at registry creation");
 }
 const initialize = (client: ReturnType<typeof host>) => client.ok("initialize", { protocolVersion: 1, clientInfo: { name: "zed", version: "1.29.1" }, clientCapabilities: {} });
 const prompt = (sessionId: string, text: string) => ({ sessionId, prompt: [{ type: "text", text }] });
@@ -184,6 +194,40 @@ test("cancel addresses only its ACP session and session close frees the store wh
 	await reopened.ok("session/load", sessionArgs(a, setup.cwd));
 	assert.ok(JSON.stringify(chunks(reopened, a)).includes("isolated-job-canary"));
 	await reopened.stop();
+});
+
+// Sequential contention cannot exercise the former empty-file/PID publication gap.
+// Pause at the real successful wx, without replacing any filesystem operation.
+test("registry creation preemption admits only B; A exit cannot release B and SIGKILL permits crash recovery", { timeout: 60_000 }, async (t) => {
+	const setup = fixture(t);
+	const preload = join(setup.directory, "pause-create.mjs");
+	writeFileSync(preload, `import fs from 'node:fs';
+import {syncBuiltinESMExports} from 'node:module';
+const open=fs.openSync;
+fs.openSync=function(path,...args){const fd=open.call(this,path,...args);
+if(String(path).endsWith('/registry-lock.sqlite')&&args[0]==='wx')process.kill(process.pid,'SIGSTOP');
+return fd;};syncBuiltinESMExports();`);
+	const a = host(t, setup, [], cli, { ...clean, NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` });
+	await stopped(a.child.pid!);
+	assert.equal(readFileSync(join(setup.sessionsDir, "registry-lock.sqlite")).length, 0, "A is stopped at real empty-file publication");
+	const b = host(t, setup);
+	await initialize(b);
+	a.child.kill("SIGCONT");
+	assert.deepEqual(await a.exited, [1, null], "creation alone never admits A after B acquired the mutex");
+	assert.equal(a.frames.length, 0);
+	assert.equal(b.child.exitCode, null);
+	const c = host(t, setup);
+	assert.deepEqual(await c.exited, [1, null], "failed A shutdown must not remove live B's ownership");
+	assert.equal(c.frames.length, 0);
+	assert.deepEqual(await b.ok("session/list"), { sessions: [] });
+	b.child.kill("SIGKILL");
+	assert.deepEqual(await b.exited, [null, "SIGKILL"]);
+	// The same permanent file recovers without PID probing, deletion or a timeout.
+	const recovered = host(t, setup);
+	await initialize(recovered);
+	const rival = host(t, setup);
+	assert.deepEqual(await rival.exited, [1, null], "crash recovery still admits only one host");
+	await recovered.stop();
 });
 
 // Local MCP fixtures exercise the real existing transport; never a live/personal MCP server.
