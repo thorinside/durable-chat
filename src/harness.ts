@@ -6,8 +6,6 @@ import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import type { MutableModels, Provider } from "@earendil-works/pi-ai/models";
 import type { Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { createRegistry, defineExtension, Harness } from "@earendil-works/pi-durable";
 import type { Conversation, Extension, ModelRef } from "@earendil-works/pi-durable";
@@ -30,7 +28,7 @@ import { JobHandoffTools } from "./handoff.ts";
 import { installRollbackSnapshot, rollbackSource } from "./rollback.ts";
 import { defaultModelId, modelChoices, selectModel, type ModelChoice, type ModelChoices } from "./models.ts";
 import { RebootArchive, rebootClosedStore } from "./reboot.ts";
-import { withOpenAiModelSnapshot } from "./openai-models.ts";
+import { openAiCatalog } from "./openai-models.ts";
 
 type FauxResponder = ReturnType<typeof createFauxResponder>;
 
@@ -54,19 +52,20 @@ function registerProvider(models: MutableModels, provider: Provider, name: strin
 }
 
 /** Every configured entry is registered on one catalog, so `/model` can list across providers. */
-export function setupProviders(config: ResolvedConfig): ProviderSetup {
+export async function setupProviders(config: ResolvedConfig): Promise<ProviderSetup> {
 	const authenticated = config.providers.filter((entry) => entry.kind === "openai-codex" || entry.kind === "openai");
-	const models = createModels({
-		...(authenticated.length === 0 ? {} : {
-			credentials: new PiAuthStore(undefined, new Map(authenticated.map((entry) => [entry.name, entry.kind]))),
-		}),
-	});
+	const credentials = new PiAuthStore(undefined, new Map(authenticated.map((entry) => [entry.name, entry.kind])));
+	const models = createModels({ credentials });
+	// Refresh canonical kinds before registering aliases and validating exact configured IDs.
+	const canonical = authenticated.length === 0 ? new Map<string, Provider>() : await openAiCatalog().load(
+		new PiAuthStore(credentials.path), [...new Set(authenticated.map((entry) => entry.kind))],
+	);
 	// Each faux entry gets its own offline instance, so a switch to another entry still reaches
 	// a scripted responder and lists its configured model.
 	const responders = new Map<string, FauxResponder>();
 	for (const entry of config.providers) {
 		if (entry.kind === "openai-codex") {
-			const provider = withOpenAiModelSnapshot(openaiCodexProvider());
+			const provider = canonical.get("openai-codex")!;
 			registerProvider(models, provider, entry.name, config);
 			if (models.getModel(entry.name, defaultModelId(entry)) === undefined) {
 				throw new Error(`The OpenAI Codex catalog does not list model "${entry.model}".`);
@@ -81,7 +80,7 @@ export function setupProviders(config: ResolvedConfig): ProviderSetup {
 			continue;
 		}
 		if (entry.kind === "openai") {
-			const provider = withOpenAiModelSnapshot(openaiProvider());
+			const provider = canonical.get("openai")!;
 			registerProvider(models, provider, entry.name, config);
 			if (models.getModel(entry.name, defaultModelId(entry)) === undefined) {
 				throw new Error(`The OpenAI catalog does not list model "${entry.model}".`);
@@ -262,7 +261,7 @@ async function openConfiguredRuntime(
 	let closeAcp: (() => Promise<void>) | undefined;
 	let storage: Awaited<ReturnType<typeof openNodeSqliteStorage>> | undefined;
 	try {
-		const setup = setupProviders(config);
+		const setup = await setupProviders(config);
 		const mcpSetup = withMcp
 			? await connectMcp({
 				...(config.mcp.configPath === undefined ? {} : { configPath: config.mcp.configPath }),

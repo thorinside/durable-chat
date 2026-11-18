@@ -194,7 +194,8 @@ test("a named Codex provider dispatches with its registry identity and existing 
 		if (previousAuthPath === undefined) delete process.env.DURABLE_AUTH_FILE;
 		else process.env.DURABLE_AUTH_FILE = previousAuthPath;
 	});
-	const { models, model } = setupProviders(resolveConfig({ configPath }, EMPTY_ENV));
+	t.mock.method(globalThis, "fetch", async () => new Response("{}", { status: 404 }));
+	const { models, model } = await setupProviders(resolveConfig({ configPath }, EMPTY_ENV));
 	const resolved = models.getModel(model.provider, model.modelId)!;
 	assert.equal(resolved.provider, "codex");
 	const apiModels = models.getAllModels("api");

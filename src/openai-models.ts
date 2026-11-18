@@ -1,253 +1,51 @@
-import type { AnyModel, Model } from "@earendil-works/pi-ai";
-import type { Provider } from "@earendil-works/pi-ai/models";
+import { InMemoryCredentialStore, InMemoryModelsStore, createModels } from "@earendil-works/pi-ai";
+import type { CredentialStore, ModelsStore, Provider } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
-// Exact typed pi.dev chat definitions, checked against Pi catalog commit
-// d4d188646c6bbd5d103238cbd05f1e5c01feb9e4. Pi AI 1.5.0's bundled catalog
-// predates these models; its Responses implementations support these fields.
-// See docs/openai-models.md for provenance, wire checks, and removal criteria.
-const SNAPSHOT = [
-	{
-		"id": "gpt-6.2-astra",
-		"name": "GPT-6.2 Astra",
-		"api": "openai-responses",
-		"provider": "openai",
-		"baseUrl": "https://api.openai.com/v1",
-		"reasoning": true,
-		"input": [
-			"text",
-			"image"
-		],
-		"cost": {
-			"input": 8,
-			"output": 40,
-			"cacheRead": 0.4,
-			"cacheWrite": 10,
-			"tiers": [
-				{
-					"inputTokensAbove": 272000,
-					"input": 16,
-					"output": 60,
-					"cacheRead": 0.8,
-					"cacheWrite": 20
-				}
-			]
-		},
-		"contextWindow": 272000,
-		"maxTokens": 128000,
-		"thinkingLevelMap": {
-			"off": null,
-			"minimal": null,
-			"low": "low",
-			"medium": "medium",
-			"high": "high",
-			"xhigh": "xhigh",
-			"max": "max"
-		},
-		"compat": {
-			"supportsStrictMode": true,
-			"supportsOpenAIGrammarTools": true,
-			"supportsAdditionalTools": true,
-			"supportsToolSearch": true,
-			"supportsMidConvoSystemMessages": true,
-			"supportsExplicitPromptCacheMode": true,
-			"supportsMidConvoEffort": true
-		},
-		"inputLimits": {
-			"maxRequestBytes": 536870912,
-			"images": {
-				"maxPerRequest": 1500,
-				"resize": {
-					"maxWidth": 2000,
-					"maxHeight": 2000,
-					"maxBytes": 4718592,
-					"jpegQuality": 80
-				}
-			}
-		},
-		"type": "chat"
-	},
-	{
-		"id": "gpt-6.2-sol",
-		"name": "GPT-6.2 Sol",
-		"api": "openai-responses",
-		"provider": "openai",
-		"baseUrl": "https://api.openai.com/v1",
-		"reasoning": true,
-		"input": [
-			"text",
-			"image"
-		],
-		"cost": {
-			"input": 2,
-			"output": 10,
-			"cacheRead": 0.1,
-			"cacheWrite": 2.5,
-			"tiers": [
-				{
-					"inputTokensAbove": 272000,
-					"input": 4,
-					"output": 15,
-					"cacheRead": 0.2,
-					"cacheWrite": 5
-				}
-			]
-		},
-		"contextWindow": 272000,
-		"maxTokens": 128000,
-		"thinkingLevelMap": {
-			"off": null,
-			"minimal": null,
-			"low": "low",
-			"medium": "medium",
-			"high": "high",
-			"xhigh": "xhigh",
-			"max": "max"
-		},
-		"compat": {
-			"supportsStrictMode": true,
-			"supportsOpenAIGrammarTools": true,
-			"supportsAdditionalTools": true,
-			"supportsToolSearch": true,
-			"supportsMidConvoSystemMessages": true,
-			"supportsExplicitPromptCacheMode": true,
-			"supportsMidConvoEffort": true
-		},
-		"inputLimits": {
-			"maxRequestBytes": 536870912,
-			"images": {
-				"maxPerRequest": 1500,
-				"resize": {
-					"maxWidth": 2000,
-					"maxHeight": 2000,
-					"maxBytes": 4718592,
-					"jpegQuality": 80
-				}
-			}
-		},
-		"type": "chat"
-	},
-	{
-		"id": "gpt-6.2-astra",
-		"name": "GPT-6.2 Astra",
-		"api": "openai-codex-responses",
-		"provider": "openai-codex",
-		"baseUrl": "https://chatgpt.com/backend-api",
-		"reasoning": true,
-		"input": [
-			"text",
-			"image"
-		],
-		"cost": {
-			"input": 8,
-			"output": 40,
-			"cacheRead": 0.4,
-			"cacheWrite": 10,
-			"tiers": [
-				{
-					"inputTokensAbove": 272000,
-					"input": 16,
-					"output": 60,
-					"cacheRead": 0.8,
-					"cacheWrite": 20
-				}
-			]
-		},
-		"contextWindow": 272000,
-		"maxTokens": 128000,
-		"thinkingLevelMap": {
-			"off": null,
-			"minimal": "low",
-			"low": "low",
-			"medium": "medium",
-			"high": "high",
-			"xhigh": "xhigh",
-			"max": "max"
-		},
-		"compat": {
-			"supportsOpenAIGrammarTools": true,
-			"supportsAdditionalTools": true,
-			"supportsToolSearch": true,
-			"supportsMidConvoSystemMessages": true
-		},
-		"inputLimits": {
-			"images": {
-				"resize": {
-					"maxWidth": 2000,
-					"maxHeight": 2000,
-					"maxBytes": 4718592,
-					"jpegQuality": 80
-				}
-			}
-		},
-		"type": "chat"
-	},
-	{
-		"id": "gpt-6.2-sol",
-		"name": "GPT-6.2 Sol",
-		"api": "openai-codex-responses",
-		"provider": "openai-codex",
-		"baseUrl": "https://chatgpt.com/backend-api",
-		"reasoning": true,
-		"input": [
-			"text",
-			"image"
-		],
-		"cost": {
-			"input": 2,
-			"output": 10,
-			"cacheRead": 0.1,
-			"cacheWrite": 2.5,
-			"tiers": [
-				{
-					"inputTokensAbove": 272000,
-					"input": 4,
-					"output": 15,
-					"cacheRead": 0.2,
-					"cacheWrite": 5
-				}
-			]
-		},
-		"contextWindow": 500000,
-		"maxTokens": 128000,
-		"thinkingLevelMap": {
-			"off": null,
-			"minimal": "low",
-			"low": "low",
-			"medium": "medium",
-			"high": "high",
-			"xhigh": "xhigh",
-			"max": "max"
-		},
-		"compat": {
-			"supportsOpenAIGrammarTools": true,
-			"supportsAdditionalTools": true,
-			"supportsToolSearch": true,
-			"supportsMidConvoSystemMessages": true
-		},
-		"inputLimits": {
-			"images": {
-				"resize": {
-					"maxWidth": 2000,
-					"maxHeight": 2000,
-					"maxBytes": 4718592,
-					"jpegQuality": 80
-				}
-			}
-		},
-		"type": "chat"
-	}
-] satisfies Model<"openai-responses" | "openai-codex-responses">[];
-
-/** Fill only missing chat IDs; keep bundled definitions and all other model types. */
-export function withOpenAiModelSnapshot(provider: Provider): Provider {
-	const additions = SNAPSHOT.filter((model) => model.provider === provider.id);
-	function merge<T extends AnyModel>(baseline: readonly T[]): (T | (typeof SNAPSHOT)[number])[] {
-		return [...baseline, ...additions.filter((model) => !baseline.some((entry) =>
-			(entry.type === undefined || entry.type === "chat") && entry.id === model.id))];
-	}
+/**
+ * Use coding-agent's public factory for its remote-decorated canonical providers.
+ * Never load the user's models.json, auth.json or catalog cache through ModelRuntime.
+ * Request credentials remain owned by durable-chat's PiAuthStore.
+ */
+export function createOpenAiCatalog(options: { catalogBaseUrl?: string; modelsStore?: ModelsStore } = {}) {
+	const source = ModelRuntime.create({
+		credentials: new InMemoryCredentialStore(),
+		modelsPath: null,
+		refreshOnCreate: false,
+		...options,
+	});
+	const modelsStore = options.modelsStore ?? new InMemoryModelsStore();
+	let refresh: Promise<ReadonlyMap<string, Provider>> | undefined;
 	return {
-		...provider,
-		getModels: () => merge(provider.getModels()),
-		getAllModels: () => merge(provider.getAllModels?.() ?? provider.getModels()),
+		load(credentials: CredentialStore, providers: readonly string[]) {
+			// One startup pass at a time; Pi's stored checkedAt supplies its native freshness window.
+			const previous = refresh;
+			const next = (async () => {
+				await previous?.catch(() => undefined);
+				const runtime = await source;
+				const models = createModels({ credentials, modelsStore });
+				for (const id of providers) {
+					const provider = runtime.getProvider(id);
+					if (!provider) throw new Error(`Unknown built-in provider: ${id}`);
+					models.setProvider(provider);
+				}
+				const result = await models.refresh({
+					providers,
+					allowNetwork: process.env.PI_OFFLINE === undefined,
+					signal: AbortSignal.timeout(10_000),
+				});
+				// Deliberately do not print upstream errors or credentials.
+				for (const id of result.errors.keys()) process.stderr.write(`[durable-chat] Model catalog refresh failed for ${id}; retaining Pi's catalog.\n`);
+				if (result.aborted) process.stderr.write("[durable-chat] Model catalog refresh timed out; retaining Pi's catalog.\n");
+				return new Map(models.getProviders().map((provider) => [provider.id, provider]));
+			})();
+			refresh = next;
+			return next;
+		},
 	};
+}
+
+let catalog: ReturnType<typeof createOpenAiCatalog> | undefined;
+export function openAiCatalog() {
+	return catalog ??= createOpenAiCatalog();
 }
