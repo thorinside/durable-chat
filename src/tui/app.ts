@@ -1398,6 +1398,7 @@ export class Dashboard implements Component {
 			`${this.previewJobId === undefined ? "target" : "preview"} spend: ${formatTokenCount(usage.tokens)} tokens${usage.cost > 0 ? `, $${usage.cost.toFixed(4)}` : ""}`,
 			`job tools: ${this.runtime.jobExtensions.flatMap((extension) => extension.tools?.map((tool) => tool.name) ?? []).join(", ") || "(none)"}`,
 			...this.runtime.mcpNotes.slice(0, 8).map((note) => `mcp: ${note}`),
+			...(this.runtime.acpError === undefined ? [] : [`acp: unavailable (${this.runtime.acpError})`]),
 			"",
 			"Edit the file with `durable-chat config edit`; restart to apply.",
 		];

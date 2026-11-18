@@ -195,6 +195,8 @@ export type AppRuntime = {
 	thinkingLevel: ModelThinkingLevel;
 	cwd: string;
 	mcpNotes: string[];
+	/** Why this runtime serves no ACP attachment; absent while it does. */
+	acpError?: string;
 	mcpAttempted: boolean;
 	mcpConnected: boolean;
 	tasksExtension: Extension;
@@ -454,8 +456,12 @@ async function openConfiguredRuntime(
 			rollback: (source) => replace(source),
 			close: () => close(true),
 		};
-		// ACP uses Unix user-private sockets; ordinary dchat remains usable on other platforms.
-		if (process.getuid) closeAcp = await serveMain(app);
+		// ACP uses Unix user-private sockets; ordinary dchat remains usable on other platforms, and
+		// where the attachment endpoint cannot be served.
+		if (process.getuid) {
+			try { closeAcp = await serveMain(app); }
+			catch (error) { app.acpError = error instanceof Error ? error.message : String(error); }
+		} else app.acpError = "requires Unix user isolation";
 		return app;
 	} catch (error) {
 		try {

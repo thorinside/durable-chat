@@ -8,7 +8,6 @@ import {
 	unlinkSync,
 } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { LiveDoc, defineDoc } from "@earendil-works/pi-durable";
 import type {
@@ -22,6 +21,7 @@ import type { AppRuntime } from "./harness.ts";
 export const SHARED_MAIN = "io.github.thorinside.durable-chat/shared-main";
 const MAX_FRAME = 4 * 1024 * 1024;
 const MAX_OUTPUT = 8 * 1024 * 1024;
+const MAX_REQUESTS = 256;
 type RecordValue = Record<string, any>;
 export type AcpMessage = {
 	jsonrpc?: string;
@@ -45,15 +45,16 @@ const Requests = defineDoc<{
 const hash = (value: string) =>
 	createHash("sha256").update(value).digest("hex");
 
-/** Deterministic per-DB rendezvous, not cwd/process discovery. Never opens storage. */
-export function ownerAddress(store: string, directory?: string): string {
+/**
+ * Deterministic per-DB rendezvous, not cwd/process discovery. Never opens storage.
+ * The owner and a frontend started by another service must agree without sharing an environment,
+ * so the location never depends on TMPDIR or XDG_RUNTIME_DIR; the directory is private and checked.
+ */
+export function ownerAddress(store: string, directory = "/tmp"): string {
 	const uid = process.getuid?.();
 	if (uid === undefined)
 		throw new Error("Local ACP attachment requires Unix user isolation");
-	const candidate = directory ?? process.env.XDG_RUNTIME_DIR ?? tmpdir();
-	let base = join(candidate, `dchat-${uid}`);
-	// Darwin's socket path limit is short; the fallback remains a private, checked directory.
-	if (Buffer.byteLength(base) > 65) base = `/tmp/dchat-${uid}`;
+	const base = join(directory, `dchat-${uid}`);
 	try {
 		mkdirSync(base, { mode: 0o700 });
 	} catch (error) {
@@ -475,11 +476,16 @@ export async function serveMain(
 								requestId: `acp:${key}`,
 							}),
 						);
-					if (!existing)
+					if (!existing) {
 						requests.requests[key] = {
 							hash: fingerprint,
 							submission: submissionId,
 						};
+						// Deduplication only has to cover retries of recent input; this record is rewritten on every prompt.
+						const keys = Object.keys(requests.requests);
+						for (const old of keys.slice(0, Math.max(0, keys.length - MAX_REQUESTS)))
+							delete requests.requests[old];
+					}
 				}, runtime.context);
 				update({
 					sessionUpdate: "session_info_update",

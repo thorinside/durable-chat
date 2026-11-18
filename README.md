@@ -78,6 +78,11 @@ dchat acp                 # standard ACP JSON-RPC over stdio; normally started b
 dchat acp --config /absolute/path/to/config.yaml
 ```
 
+The socket lives in a private `/tmp/dchat-<uid>` directory regardless of `TMPDIR` or
+`XDG_RUNTIME_DIR`, so a frontend started by a service finds the terminal's owner. If the
+endpoint cannot be served, dchat itself still starts; `dchat info` reports ACP as unavailable
+and why.
+
 Start the ordinary TUI/plain owner first. No existing owner means unavailable,
 not auto-start. Multiple instances may own different databases; cwd alone is not
 instance identity. Main input/output, reported tools, and Main's normal job notices

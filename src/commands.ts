@@ -219,6 +219,7 @@ export async function printInfo(runtime: AppRuntime): Promise<void> {
 	line(`Job tools:  ${jobTools.length === 0 ? "(none)" : jobTools.join(", ")}`);
 	line(`MCP:        ${runtime.mcpAttempted ? (runtime.mcpConnected ? "substrate connected" : "substrate unavailable") : "not checked by this command"}`);
 	for (const note of runtime.mcpNotes) line(`  · ${note}`);
+	line(`ACP:        ${runtime.acpError === undefined ? "Main attachable with `durable-chat acp`" : `unavailable (${runtime.acpError})`}`);
 	for (const warning of runtime.config.warnings) line(`  ! ${warning}`);
 }
 
