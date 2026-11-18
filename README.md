@@ -66,6 +66,122 @@ the normal lock error. If Ghostty cannot focus the terminal, or Automation permi
 the original error is shown. This uses Ghostty's `macos-applescript` support (enabled by default);
 macOS may ask for Automation permission on the first use.
 
+## ACP host for Zed New Thread (unreleased)
+
+`dchat acp serve` is a **separate, opt-in foreground stdio host**. It needs no TUI
+or existing terminal owner. This source feature is not in the published npm 1.0.3
+archive; use a build containing it. Configure a custom external agent in Zed's
+settings (use an absolute `command` path if Zed's PATH does not include dchat):
+
+```json
+{
+  "agent_servers": {
+    "durable-chat": {
+      "type": "custom",
+      "command": "dchat",
+      "args": ["acp", "serve"],
+      "env": {}
+    }
+  }
+}
+```
+
+Select **durable-chat** in the Agent Panel's **New Thread** menu. No private
+`_meta` handshake is needed. `initialize` negotiates ACP **wire version 1**;
+`session/new`, `session/prompt`, `session/cancel`, `session/load`, `session/list`
+and `session/close` are supported. Zed's **Import Threads** uses list/load; it is
+not a substitute for New Thread's `session/new`.
+
+Each new session gets an unpredictable, stable `acp-<uuid>` ID and **its own**
+`<sessions-dir>/<id>/state.sqlite`, with identity/canonical cwd in `session.json`.
+It never aliases terminal Main or the configured default database. The registry
+lists/loads only these ACP-owned identities, not terminal sessions or jobs. A new
+session requires an existing absolute cwd. Load requires that original cwd and
+identical forwarded MCP configuration, and replays committed public history
+**before** its reply; private reasoning/system entries and live drafts are not
+projected. Generic chunks append, so output is committed-message streaming, not
+disposable token previews. Native cancellation can commit a public partial answer.
+
+Host options:
+
+```sh
+dchat acp serve --sessions-dir /absolute/private/acp-sessions \
+  --config /absolute/path/to/config.yaml --provider my-provider --model my-model
+```
+
+- Default registry: `$XDG_DATA_HOME/durable-chat/acp`, or
+  `~/.local/share/durable-chat/acp`. Existing registry directories must be private
+  (0700) and user-owned. Only one host can own a registry at a time; choose a
+  different `--sessions-dir` for an independent host. `--store`/`--endpoint` are
+  attach-only flags, rejected by serve. Registry admission holds an exclusive
+  SQLite transaction on the permanent `registry-lock.sqlite` file (local
+  filesystems with SQLite locking only). Ownership is released by closing the
+  connection or process death, not by deleting a PID file; crash restart needs
+  no stale-lock cleanup. Never remove/replace that file while any host is live.
+  Native store locks are unchanged. Pre-fix development builds used
+  `registry.lock`: if present, startup fails closed. Stop all old hosts before
+  removing that legacy marker offline; do not mix old/new hosts on one registry.
+- Existing agent config, environment and native auth (including `dchat config
+  login`) select credentials/providers; Zed secrets are not a new auth mechanism.
+  `--config` is explicit; otherwise each session's cwd selects its folder-local
+  `.durable-chat/config.yaml` over global defaults. Relative config store/MCP
+  paths use that cwd, but serve always overrides the store with its own path.
+  Repository instructions, native tools and jobs use the session cwd, without
+  changing the host process cwd. Model selection is startup config, not an ACP
+  model picker; changed config applies when a runtime is next opened.
+- EOF, SIGINT and SIGTERM checkpoint and close all owned runtimes, locks and MCP
+  children; there is no orphan background daemon. Durable jobs pause while closed
+  and resume when that session is loaded again. `session/close` cancels Main and
+  releases that runtime; it retains durable history/jobs for later load. Cancel
+  addresses only that session's Main, never another session or its background jobs.
+- Stdout is JSON-RPC only; diagnostics go to stderr. Unexpected runtime/config/
+  transport errors are redacted. Normal public agent/tool output can contain data
+  the agent deliberately reads: this is **not** a secret-output filter.
+
+### Forwarded MCP and authority
+
+Serve connects **only session-forwarded stdio MCP servers** using the existing
+MCP client/transport; it never discovers or reuses global/project MCP connections.
+Each session owns its own child processes, cwd and literal arguments/environment.
+ACP v1 stdio entries have `name`, absolute executable `command`, string `args`,
+and `env: [{"name":"KEY","value":"VALUE"}]` (no required `type`). HTTP, SSE,
+unknown transports, malformed configs and connection failures are explicit errors,
+not silently ignored. Config/env values are fingerprinted for load matching, not
+stored as plaintext in the registry; supply the same configs again on load.
+Children inherit the host environment plus those per-session overrides. They are
+trusted programs, not sandboxes.
+
+For a minimal **empty-MCP Zed profile**, use a clean Zed workspace/settings with
+no configured context servers, including extension-provided servers, and the
+custom agent config above. Zed forwards project context-server configurations
+on new/load. Add `"--no-mcp"` to the agent's args to fail explicitly if any are
+forwarded; this flag does not silently strip them. Zed HTTP MCP configurations
+must be removed for this stdio-only profile.
+
+As in the terminal, Main is a coordinator: it delegates filesystem work and the
+forwarded MCP tools to durable background jobs. ACP projects Main and its public
+job notices, not private job transcripts. Native agent coding tools retain their
+normal filesystem/process authority as the launching user. Zed file/terminal
+delegation and editor permission prompts are **not** used. Session isolation separates durable conversation state and cwd;
+it does **not** restrict access to other paths, enforce editor approvals, or
+provide a security sandbox. Use only trusted repositories, instructions and MCP
+programs. Existing terminal/Substrate attachment below is unchanged.
+
+Limits: 16 simultaneously open runtimes (close one to free a slot); list pages of
+100; 100,000 prompt characters; 4 MiB input frames / 8 MiB queued output; text and
+resource-link prompts only. Forwarded MCP: 8 servers, names up to 64 ASCII
+letters/digits/`_`/`.`/`-` (colliding normalized names rejected), 256 args/env
+entries of at most 8192 characters, 10-second requests; the existing adapter
+exposes at most 20 direct tools/server (Substrate uses its search/describe/call
+gateway). No images/audio/embedded resources, custom system prompts, additional
+workspace roots, session deletion/resume or editor-managed authentication.
+
+References: [Zed external agents/custom configuration](https://zed.dev/docs/ai/external-agents),
+[Zed v1.29.1 new/load and forwarded MCP](https://github.com/zed-industries/zed/blob/v1.29.1/crates/agent_servers/src/acp/v1.rs),
+and [ACP stable v1 schema, schema-v1.33.0](https://github.com/agentclientprotocol/agent-client-protocol/blob/schema-v1.33.0/schema/v1/schema.json).
+The schema release number is **not** the ACP wire version or an ACP SDK version;
+no SDK dependency was added.
+
 ## ACP attachment to an already-running Main
 
 An open dchat runtime exposes only Main through a user-private Unix socket. The

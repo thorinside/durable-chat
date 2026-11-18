@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
+import { createInterface } from "node:readline";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +13,7 @@ const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 
 // Source CLI tests cannot catch Node refusing TypeScript under node_modules,
 // npm excluding build output, or missing executable aliases/license notices.
-test("the published archive installs built JavaScript and both binaries run durable offline jobs without exposing local state", { timeout: 120_000 }, () => {
+test("the published archive installs built JavaScript and both binaries run durable offline jobs without exposing local state", { timeout: 120_000 }, async () => {
 	const dir = mkdtempSync(join(tmpdir(), "durable-chat-package-"));
 	try {
 		const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("DURABLE_") && !["NODE_OPTIONS", "OPENAI_API_KEY"].includes(key)));
@@ -54,6 +56,43 @@ test("the published archive installs built JavaScript and both binaries run dura
 		const jobs = run(bin("durable-chat"), [...args, "tasks"]);
 		assert.match(jobs, /completed/);
 		assert.match(jobs, /release package smoke/);
+		// Source tests cannot detect a missing built host module or manifest-relative version lookup.
+		const sessions = join(env.XDG_DATA_HOME, "durable-chat", "acp");
+		const host = spawn(bin("dchat"), ["acp", "serve"], { cwd: dir, env: { ...env, DURABLE_CHAT_CONFIG: config }, stdio: ["pipe", "pipe", "pipe"] });
+		const exited = once(host, "exit");
+		const frames = [];
+		const pending = new Map();
+		let diagnostics = "";
+		host.stderr.on("data", (value) => { diagnostics += value; });
+		const lines = createInterface({ input: host.stdout });
+		lines.on("line", (line) => {
+			const frame = JSON.parse(line);
+			assert.equal(frame.jsonrpc, "2.0");
+			frames.push(frame);
+			pending.get(frame.id)?.(frame);
+		});
+		let next = 0;
+		const request = (method, params) => new Promise((resolve, reject) => {
+			const id = ++next;
+			// Deadline for an actual installed CLI event, not a model pacing sleep.
+			const timeout = setTimeout(() => { pending.delete(id); reject(new Error(`Installed ACP deadline: ${diagnostics}`)); }, 15_000);
+			pending.set(id, (frame) => { clearTimeout(timeout); pending.delete(id); frame.error ? reject(new Error(frame.error.message)) : resolve(frame.result); });
+			host.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+		});
+		try {
+			assert.equal((await request("initialize", { protocolVersion: 1 })).agentInfo.version, metadata.version);
+			const { sessionId } = await request("session/new", { cwd: dir, mcpServers: [] });
+			assert.equal((await request("session/prompt", { sessionId, prompt: [{ type: "text", text: "installed ACP host smoke" }] })).stopReason, "end_turn");
+			assert.equal((await request("session/list", {})).sessions[0].sessionId, sessionId);
+			assert.ok(frames.some((frame) => frame.params?.update?.sessionUpdate === "agent_message_chunk"));
+			host.stdin.end();
+			assert.deepEqual(await exited, [0, null], diagnostics);
+			assert.equal(existsSync(join(sessions, sessionId, "state.sqlite.lock")), false);
+		} finally {
+			if (host.exitCode === null && host.signalCode === null) host.kill("SIGKILL");
+			await exited;
+			lines.close();
+		}
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

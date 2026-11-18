@@ -20,7 +20,7 @@ import { resolveConfig, parseThinkingLevel, type ProviderEntry, type ResolvedCon
 import { PiAuthStore } from "./auth.ts";
 import { createFauxResponder } from "./faux.ts";
 import { applyStartupJobModel, applyThinkingLevel, MAIN_INSTRUCTIONS, type JobCreateOptions } from "./jobs.ts";
-import { connectMcp, type McpSetup } from "./mcp.ts";
+import { connectMcp, type McpSetup, type McpServerEntry } from "./mcp.ts";
 import { createTaskExtension } from "./tool.ts";
 import { openCodemode, type CodemodeSetup } from "./codemode.ts";
 import { supportsImages as modelSupportsImages } from "./images.ts";
@@ -223,15 +223,23 @@ export async function openRuntime(options: {
 	configPath?: string;
 	verbose?: boolean;
 	withMcp?: boolean;
+	cwd?: string;
+	/** ACP-owned runtimes must never announce themselves as terminal owners. */
+	announceOwner?: boolean;
+	/** Explicit session MCP servers bypass all global/project discovery. */
+	mcpServers?: Record<string, McpServerEntry>;
+	redactErrors?: boolean;
 }): Promise<AppRuntime> {
 	const config = resolveConfig({
+		...(options.cwd === undefined ? {} : { cwd: options.cwd }),
 		...(options.storePath === undefined ? {} : { store: options.storePath }),
 		...(options.provider === undefined ? {} : { provider: options.provider }),
 		...(options.model === undefined ? {} : { model: options.model }),
 		...(options.configPath === undefined ? {} : { configPath: options.configPath }),
 	});
 	return openConfiguredRuntime(config, {
-		cwd: process.cwd(), withMcp: options.withMcp ?? config.mcp.enabled, verbose: options.verbose === true,
+		cwd: options.cwd ?? process.cwd(), withMcp: options.withMcp ?? config.mcp.enabled, verbose: options.verbose === true,
+		announceOwner: options.announceOwner ?? true, mcpServers: options.mcpServers, redactErrors: options.redactErrors ?? false,
 		modelLimits: { contextWindow: config.contextWindow, maxTokens: config.maxTokens },
 	}, acquireStoreLock(resolve(config.storePath)));
 }
@@ -239,7 +247,7 @@ export async function openRuntime(options: {
 /** Reboots retain the startup configuration and transfer the still-held store lock to the new runtime. */
 async function openConfiguredRuntime(
 	config: ResolvedConfig,
-	options: { cwd: string; withMcp: boolean; verbose: boolean; modelLimits: { contextWindow: number; maxTokens: number } },
+	options: { cwd: string; withMcp: boolean; verbose: boolean; announceOwner: boolean; mcpServers?: Record<string, McpServerEntry>; redactErrors: boolean; modelLimits: { contextWindow: number; maxTokens: number } },
 	releaseLock: () => void,
 	releaseOnFailure = true,
 	archivePath?: string,
@@ -259,8 +267,9 @@ async function openConfiguredRuntime(
 			? await connectMcp({
 				...(config.mcp.configPath === undefined ? {} : { configPath: config.mcp.configPath }),
 				servers: config.mcp.servers,
-				tools: config.mcp.tools,
+				tools: options.mcpServers === undefined ? config.mcp.tools : [],
 				verbose: options.verbose === true,
+				cwd, entries: options.mcpServers, redactErrors: options.redactErrors,
 			})
 			: { extensions: [] as Extension[], notes: [] as string[], close: async () => undefined };
 		mcp = mcpSetup;
@@ -303,7 +312,7 @@ async function openConfiguredRuntime(
 			},
 			env: (target, callContext) => jobEnvironment(target, callContext, cwd),
 			onReport: (report) => {
-				const error = report.error instanceof Error ? report.error.message : String(report.error);
+				const error = options.redactErrors ? "Runtime operation failed (details redacted)" : report.error instanceof Error ? report.error.message : String(report.error);
 				const task = "task" in report && report.task !== undefined ? ` #${report.task.id}` : "";
 				process.stderr.write(`[durable-chat] ${report.kind}${task}: ${error}\n`);
 			},
@@ -459,10 +468,10 @@ async function openConfiguredRuntime(
 		};
 		// ACP uses Unix user-private sockets; ordinary dchat remains usable on other platforms, and
 		// where the attachment endpoint cannot be served.
-		if (process.getuid) {
+		if (options.announceOwner && process.getuid) {
 			try { closeAcp = await serveMain(app); }
 			catch (error) { app.acpError = error instanceof Error ? error.message : String(error); }
-		} else app.acpError = "requires Unix user isolation";
+		} else app.acpError = options.announceOwner ? "requires Unix user isolation" : "ACP-owned session (no terminal attachment)";
 		return app;
 	} catch (error) {
 		try {

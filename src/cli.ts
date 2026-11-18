@@ -34,6 +34,7 @@ const OPTIONS = {
 	model: { type: "string" as const },
 	config: { type: "string" as const },
 	endpoint: { type: "string" as const },
+	"sessions-dir": { type: "string" as const },
 	force: { type: "boolean" as const, default: false },
 	local: { type: "boolean" as const, default: false },
 	plain: { type: "boolean" as const, default: false },
@@ -339,6 +340,15 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (command === "acp") {
+		if (sub === "serve") {
+			if (positionals.length !== 2 || values.store !== undefined || values.endpoint !== undefined) throw new Error("Usage: dchat acp serve [--sessions-dir <directory>] [--config <file>] [--provider <name>] [--model <id>] [--no-mcp]; --store/--endpoint belong to attach mode");
+			const { acpServe } = await import("./acp-serve.ts");
+			try {
+				await acpServe({ sessionsDir: values["sessions-dir"], configPath: values.config, provider: values.provider, model: values.model, noMcp: values["no-mcp"] });
+			} catch { throw new Error("ACP host unavailable (details redacted); check session directory permissions/ownership, host lock and agent configuration"); }
+			return;
+		}
+		if (values["sessions-dir"] !== undefined) throw new Error("--sessions-dir requires acp serve");
 		const { acpFrontend, listMains } = await import("./acp.ts");
 		if (positionals[1] === "list") {
 			process.stdout.write(`${JSON.stringify({ mains: await listMains() })}\n`);

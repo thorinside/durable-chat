@@ -247,6 +247,11 @@ export function printHelp(command: "main" | "jobs" = "main"): void {
 	line("durable-chat watch [--follow]    live job board until jobs settle");
 	line("durable-chat acp                attach-only ACP stdio frontend for existing Main");
 	line("durable-chat acp list           running Mains as JSON, each with its --endpoint");
+	line("durable-chat acp serve          foreground stdio ACP host; isolated new/load sessions, no TUI");
+	line("  --sessions-dir <directory>    ACP-only registry/stores (default: $XDG_DATA_HOME/durable-chat/acp or ~/.local/share/durable-chat/acp)");
+	line("  --config <file> --provider <name> --model <id> select existing agent configuration/auth");
+	line("  --no-mcp                     reject forwarded MCP (serve never discovers global MCP)");
+	line('  Zed agent_servers: {"durable-chat":{"type":"custom","command":"dchat","args":["acp","serve"],"env":{}}}');
 	line("durable-chat compact [focus]     compact the main conversation");
 	line("durable-chat reset [handoff]     reset the main context");
 	line("durable-chat info                store, model, limits, tools, MCP status");
