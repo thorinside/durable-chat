@@ -15,6 +15,7 @@ import { createRepositoryInstructions } from "./agent-instructions.ts";
 import { jobEnvironment } from "./workspaces.ts";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { serveMain } from "./acp.ts";
 import { resolveConfig, parseThinkingLevel, type ProviderEntry, type ResolvedConfig } from "./config.ts";
 import { PiAuthStore } from "./auth.ts";
 import { createFauxResponder } from "./faux.ts";
@@ -194,6 +195,8 @@ export type AppRuntime = {
 	thinkingLevel: ModelThinkingLevel;
 	cwd: string;
 	mcpNotes: string[];
+	/** Why this runtime serves no ACP attachment; absent while it does. */
+	acpError?: string;
 	mcpAttempted: boolean;
 	mcpConnected: boolean;
 	tasksExtension: Extension;
@@ -247,6 +250,7 @@ async function openConfiguredRuntime(
 	let mcp: McpSetup | undefined;
 	let codemode: CodemodeSetup | undefined;
 	let harness: Harness | undefined;
+	let closeAcp: (() => Promise<void>) | undefined;
 	let storage: Awaited<ReturnType<typeof openNodeSqliteStorage>> | undefined;
 	try {
 		const setup = setupProviders(config);
@@ -331,7 +335,7 @@ async function openConfiguredRuntime(
 		const close = (release: boolean): Promise<void> => {
 			closing ??= (async () => {
 				try {
-					await harness?.close(context);
+					try { await closeAcp?.(); } finally { await harness?.close(context); }
 				} finally {
 					try { await mcp?.close(); }
 					finally { try { await codemode?.close(); } finally { if (release) releaseLock(); } }
@@ -452,6 +456,12 @@ async function openConfiguredRuntime(
 			rollback: (source) => replace(source),
 			close: () => close(true),
 		};
+		// ACP uses Unix user-private sockets; ordinary dchat remains usable on other platforms, and
+		// where the attachment endpoint cannot be served.
+		if (process.getuid) {
+			try { closeAcp = await serveMain(app); }
+			catch (error) { app.acpError = error instanceof Error ? error.message : String(error); }
+		} else app.acpError = "requires Unix user isolation";
 		return app;
 	} catch (error) {
 		try {

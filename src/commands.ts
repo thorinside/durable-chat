@@ -219,6 +219,7 @@ export async function printInfo(runtime: AppRuntime): Promise<void> {
 	line(`Job tools:  ${jobTools.length === 0 ? "(none)" : jobTools.join(", ")}`);
 	line(`MCP:        ${runtime.mcpAttempted ? (runtime.mcpConnected ? "substrate connected" : "substrate unavailable") : "not checked by this command"}`);
 	for (const note of runtime.mcpNotes) line(`  · ${note}`);
+	line(`ACP:        ${runtime.acpError === undefined ? "Main attachable with `durable-chat acp`" : `unavailable (${runtime.acpError})`}`);
 	for (const warning of runtime.config.warnings) line(`  ! ${warning}`);
 }
 
@@ -244,6 +245,7 @@ export function printHelp(command: "main" | "jobs" = "main"): void {
 	line("durable-chat task send <id> <m> [--steer]  continue or steer a job");
 	line("durable-chat task cancel <id>    abort a job");
 	line("durable-chat watch [--follow]    live job board until jobs settle");
+	line("durable-chat acp                attach-only ACP stdio frontend for existing Main");
 	line("durable-chat compact [focus]     compact the main conversation");
 	line("durable-chat reset [handoff]     reset the main context");
 	line("durable-chat info                store, model, limits, tools, MCP status");
