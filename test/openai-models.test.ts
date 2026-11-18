@@ -103,11 +103,34 @@ function sse(toolCall: boolean): Response {
 	return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "Content-Type": "text/event-stream" } });
 }
 
+// Direct completeSimple checks below bypass Pi Durable's off-to-omitted option handling.
+test("a fresh GPT-6.2 runtime with default thinking off omits reasoning and effort configuration updates", { timeout: 10_000 }, async (t) => {
+	const { dir, configPath } = fixture(t);
+	const requests: any[] = [];
+	t.mock.method(globalThis, "fetch", async (url, init) => {
+		assert.equal(String(url), "https://api.openai.com/v1/responses");
+		assert.equal(new Headers(init?.headers).get("authorization"), `Bearer ${API_KEY}`);
+		requests.push(JSON.parse(String(init?.body)));
+		return sse(false);
+	});
+	const runtime = await openRuntime({ configPath, storePath: join(dir, "store.sqlite"), withMcp: false });
+	t.after(async () => runtime.close());
+	assert.equal((await runtime.root.agent(runtime.context)).thinkingLevel, "off");
+	const submission = await runtime.root.submit({ type: "input", content: "answer without an effort override" }, runtime.context);
+	runtime.harness.resume();
+	const settled = await submission.wait(runtime.context);
+	assert.equal(settled.status, "done", JSON.stringify(settled));
+	assert.equal(requests.length, 1);
+	assert.equal(requests[0].model, "gpt-6.2-sol");
+	assert.equal(requests[0].reasoning, undefined);
+	assert.ok(!requests[0].input.some((item: any) => item.type === "configuration_update"));
+});
+
 // Catalog-only checks cannot prove that pinned Pi consumes compat flags or serializes usable tools.
 for (const aliases of [false, true]) {
 	for (const kind of ["openai", "openai-codex"]) {
 		for (const id of IDS) {
-			test(`${aliases ? "named" : "built-in"} ${kind}/${id} uses Responses tools, constrained thinking and append-only updates`, async (t) => {
+			test(`${aliases ? "named" : "built-in"} ${kind}/${id} with ${kind === "openai" ? "API key" : "Codex OAuth"} uses Responses tools, explicit effort clamping and append-only updates`, async (t) => {
 				const { configPath, api, codex } = fixture(t, aliases);
 				const provider = kind === "openai" ? api : codex;
 				const { models } = setupProviders(resolveConfig({ configPath }, {}));
@@ -139,7 +162,7 @@ for (const aliases of [false, true]) {
 					messages: [{ role: "user", content: [{ type: "text", text: "look this up" }, { type: "image", mimeType: "image/png", data: "c3ludGhldGlj" }], timestamp: 0 }],
 				};
 				const options = { transport: "sse" as const, fetch, maxRetries: 0, cacheRetention: "long" as const };
-				// The app defaults to off: Pi must clamp it rather than sending rejected effort none.
+				// Explicit completeSimple off clamps to low; Pi Durable's default off omits the option instead.
 				const first = await models.completeSimple(model, context, { ...options, reasoning: "off" });
 				assert.equal(first.stopReason, "toolUse", first.errorMessage);
 				assert.equal(first.provider, provider);

@@ -11,7 +11,11 @@ providers:
   subscription: { kind: openai-codex, model: gpt-6.2-astra }
 ```
 
-Named entries still use the existing Pi credentials for their **kind**, not a new credential namespace. No login, generation, account model-list request, or catalog refresh is performed by browsing the picker.
+Named entries still use the existing Pi credentials for their **kind**, not a new credential namespace. The `api` example and named `openai` serialization tests use **API-key authentication**, not OpenAI OAuth. No login, generation, account model-list request, or catalog refresh is performed by browsing the picker.
+
+### Existing named OpenAI OAuth limitation
+
+Credential-kind mapping does not guarantee OAuth wire compatibility. Pi 1.5.0's Responses transport recognizes Sign in with ChatGPT only when `model.provider === "openai"` (with the built-in base URL and a non-`sk-` token). A named `kind: openai` entry changes that identity: it bypasses the detector and can send OAuth-unsupported `max_output_tokens`, `prompt_cache_options`, and `configuration_update` fields. This pre-existing alias limitation is not fixed by the catalog overlay; named OpenAI OAuth is **not validated** here. Keep the built-in `openai` provider name to retain that detector, or use `kind: openai-codex` with its corresponding Codex credentials and dedicated transport. These paths are checked offline only, not a guarantee of live account access or server acceptance.
 
 ## Why a static overlay
 
@@ -42,18 +46,18 @@ We retain Pi's operating limits, not the larger advertised capability window:
 
 Pi caps direct API context to the short-context pricing tier. The snapshot still retains long-context prices. Application-configured ceilings can further restrict these limits.
 
-For both providers, `off` is unsupported. Direct API `minimal` is also unsupported; Codex maps `minimal` to native `low`. Pi's simple request path clamps unsupported settings to a supported level, so the application's default `off` sends `low`, never `none`. Supported native levels run from `low` through `max`. No fabricated temperature/sampling defaults are added.
+For both providers, `off` is unsupported. Direct API `minimal` is also unsupported; Codex maps `minimal` to native `low`. Explicitly calling Pi's `completeSimple` with `reasoning: "off"` clamps to native `low`. This is **not** the application's default-runtime behavior: Pi Durable omits the reasoning option when the configured thinking level is `off`. For these models, a fresh default-runtime request therefore omits both top-level `reasoning` and effort `configuration_update` items, leaving effort to the server; it does not explicitly send `low` or `none`. Supported native levels run from `low` through `max`. No fabricated temperature/sampling defaults are added.
 
 ## Wire compatibility and prefix changes
 
 The installed **1.5.0** Responses implementations were inspected, not merely the newer catalog:
 
 - They consume the copied grammar/tool-search/additional-tools and mid-conversation system-message flags. Tools and later instruction updates stay in place in the input transcript rather than being folded into an edited prefix. Optional JSON-schema properties remain optional.
-- Direct API requests carry stable instructions in a leading developer message in `input`, not top-level `instructions`. The mid-conversation effort flag uses `configuration_update` items, retaining historical native effort while changing current effort. The explicit cache flag replaces legacy retention with `prompt_cache_options` (long retention uses `ttl: "30m"`).
+- OpenAI API-key requests carry stable instructions in a leading developer message in `input`, not top-level `instructions`. With an explicit effort override, the mid-conversation effort flag uses `configuration_update` items, retaining historical native effort while changing current effort. The explicit cache flag replaces legacy retention with `prompt_cache_options` (long retention uses `ttl: "30m"`). Built-in `openai` OAuth detection suppresses those OAuth-unsupported fields as described above.
 - Codex uses its dedicated Responses transport. Pi 1.5.0 carries the **initial** system prompt in top-level `instructions`, and sends later developer updates in `input`. The pinned upstream Codex implementation does the same. This field remains supported, but GPT-6.2 appends it after input: **do not assume initial Codex instructions are prompt-cache eligible or precede input on the server**. This layer does not rewrite the Codex protocol or promise cache savings.
 - Encrypted reasoning and tool-call/result pairs are replayed in order for same-model continuations. Model switches, rollbacks, compaction or other prefix edits can still cause the server to discard reasoning, with quality/token-cost implications described in the migration guide. A catalog shim cannot prevent that server behavior; no cross-model reasoning retention guarantee is made.
 
-`test/openai-models.test.ts` checks offline discovery and session switching, both built-in and named provider dispatch, credential-kind mapping, Responses URLs, image serialization, tool calls/results, schema fidelity, unsupported effort clamping, omitted effort, append-only tool/developer updates, reasoning replay, direct cache/effort configuration, and Codex instructions. Fetch is mocked with synthetic credentials and SSE; Codex's compressed request body is decoded in the mock. These checks make **no real model calls**, and do not establish account access or live server acceptance.
+`test/openai-models.test.ts` checks offline discovery and session switching, both built-in and named provider dispatch (OpenAI API key / Codex OAuth), credential-kind mapping, Responses URLs, image serialization, tool calls/results, schema fidelity, explicit unsupported effort clamping, omitted effort (including a fresh default-runtime request), append-only tool/developer updates, reasoning replay, direct cache/effort configuration, and Codex instructions. Fetch is mocked with synthetic credentials and SSE; Codex's compressed request body is decoded in the mock. These checks make **no real model calls**, and do not establish account access or live server acceptance.
 
 ## Removal
 
