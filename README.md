@@ -7,10 +7,11 @@ persisted agent conversations with a minimal covering tool set and the Substrate
 running while you keep chatting, survive process restarts, and can be inspected, continued, compacted,
 reset, or cancelled. A job can hand its remaining work to a successor job or back to the coordinator.
 
-Built on `@earendil-works/pi-durable` 1.5.0 (SQLite storage), `pi-ai`, `pi-schema`, and `pi-mcp`.
+Built on `@earendil-works/pi-durable` 1.5.2 (SQLite storage), `pi-ai`, `pi-schema`, and `pi-mcp`.
 
 Maintainer overview: [docs/HANDOFF.md](docs/HANDOFF.md).
 Release process: [docs/RELEASING.md](docs/RELEASING.md).
+1.1.0 release notes: [docs/releases/1.1.0.md](docs/releases/1.1.0.md).
 
 ## Install and run
 
@@ -66,11 +67,11 @@ the normal lock error. If Ghostty cannot focus the terminal, or Automation permi
 the original error is shown. This uses Ghostty's `macos-applescript` support (enabled by default);
 macOS may ask for Automation permission on the first use.
 
-## ACP host for Zed New Thread (unreleased)
+## ACP host for Zed New Thread (1.1.0)
 
 `dchat acp serve` is a **separate, opt-in foreground stdio host**. It needs no TUI
-or existing terminal owner. This source feature is not in the published npm 1.0.3
-archive; use a build containing it. Configure a custom external agent in Zed's
+or existing terminal owner. Requires durable-chat 1.1.0 or a source build containing
+this feature; the 1.0.3 archive does not include it. Configure a custom external agent in Zed's
 settings (use an absolute `command` path if Zed's PATH does not include dchat):
 
 ```json
