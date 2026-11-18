@@ -30,6 +30,7 @@ import { JobHandoffTools } from "./handoff.ts";
 import { installRollbackSnapshot, rollbackSource } from "./rollback.ts";
 import { defaultModelId, modelChoices, selectModel, type ModelChoice, type ModelChoices } from "./models.ts";
 import { RebootArchive, rebootClosedStore } from "./reboot.ts";
+import { withOpenAiModelSnapshot } from "./openai-models.ts";
 
 type FauxResponder = ReturnType<typeof createFauxResponder>;
 
@@ -65,7 +66,7 @@ export function setupProviders(config: ResolvedConfig): ProviderSetup {
 	const responders = new Map<string, FauxResponder>();
 	for (const entry of config.providers) {
 		if (entry.kind === "openai-codex") {
-			const provider = openaiCodexProvider();
+			const provider = withOpenAiModelSnapshot(openaiCodexProvider());
 			registerProvider(models, provider, entry.name, config);
 			if (models.getModel(entry.name, defaultModelId(entry)) === undefined) {
 				throw new Error(`The OpenAI Codex catalog does not list model "${entry.model}".`);
@@ -80,7 +81,7 @@ export function setupProviders(config: ResolvedConfig): ProviderSetup {
 			continue;
 		}
 		if (entry.kind === "openai") {
-			const provider = openaiProvider();
+			const provider = withOpenAiModelSnapshot(openaiProvider());
 			registerProvider(models, provider, entry.name, config);
 			if (models.getModel(entry.name, defaultModelId(entry)) === undefined) {
 				throw new Error(`The OpenAI catalog does not list model "${entry.model}".`);
