@@ -590,11 +590,10 @@ numbered list and accepts a number, exact ID, or `provider/id`. `/model <exact-i
 When two entries list the same ID, the picker shows the provider-qualified `provider/id` so the choice
 cannot be ambiguous.
 
-OpenAI/Codex use their installed chat-model catalog, plus a focused static compatibility snapshot
-for `gpt-6.2-astra` and `gpt-6.2-sol` on both provider kinds (including named entries).
-These use Responses for tool calling; unsupported thinking `off` is clamped to `low`, not `none`.
-Catalog presence does not establish account access. See [provenance, operating limits, and
-prefix/instructions caveats](docs/openai-models.md).
+OpenAI/Codex use Pi's bundled and native remote chat-model catalog, including named entries.
+Startup performs a bounded refresh before validating the exact configured ID; the picker does
+not download catalogs or refresh OAuth. Missing IDs fail without a fallback. Catalog presence
+does not establish account access. See [model discovery and refresh policy](docs/openai-models.md).
 Local servers are queried at the configured
 OpenAI-compatible `/models` endpoint, using the configured API key when present, with a five-second
 timeout. If discovery fails, the configured model remains available. Browsing sends no generation
