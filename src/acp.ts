@@ -18,6 +18,7 @@ import type {
 } from "@earendil-works/pi-durable";
 import { resolveConfig } from "./config.ts";
 import type { AppRuntime } from "./harness.ts";
+import { PACKAGE_VERSION } from "./version.ts";
 
 export const SHARED_MAIN = "io.github.thorinside.durable-chat/shared-main";
 const MAX_FRAME = 4 * 1024 * 1024;
@@ -470,7 +471,7 @@ export async function serveMain(
 					sharedMain = params.clientCapabilities?._meta?.[SHARED_MAIN]?.version === 1;
 					reply({
 						protocolVersion: 1,
-						agentInfo: { name: "durable-chat", version: "1.0.0" },
+						agentInfo: { name: "durable-chat", version: PACKAGE_VERSION },
 						agentCapabilities: {
 							loadSession: true,
 							sessionCapabilities: { list: {} },

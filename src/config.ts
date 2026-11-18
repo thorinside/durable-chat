@@ -146,8 +146,8 @@ function configCandidates(env: NodeJS.ProcessEnv): { candidates: string[]; expli
 }
 
 /** Only the launch folder is inspected; parent folders do not contribute config. */
-export function localConfigPath(): string {
-	const preferred = resolve(".durable-chat/config.yaml");
+export function localConfigPath(cwd = process.cwd()): string {
+	const preferred = resolve(cwd, ".durable-chat/config.yaml");
 	const alternate = preferred.replace(/\.yaml$/, ".yml");
 	return existsSync(preferred) ? preferred : existsSync(alternate) ? alternate : preferred;
 }
@@ -300,6 +300,8 @@ function loadConfigFile(
 }
 
 export type ConfigOverrides = {
+	/** Session-local discovery and relative paths, without changing process.cwd(). */
+	cwd?: string;
 	store?: string;
 	provider?: string;
 	model?: string;
@@ -312,7 +314,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}, env: NodeJS.Proce
 	const warnings: string[] = [];
 	const file = loadConfigFile(env, warnings, overrides.configPath);
 	const explicit = overrides.configPath !== undefined || configCandidates(env).explicit;
-	const localPath = localConfigPath();
+	const localPath = localConfigPath(overrides.cwd);
 	const local = !explicit && existsSync(localPath) ? loadConfigFile(env, warnings, localPath) : undefined;
 	const activeFile = local ?? file;
 	const raw: RawConfig = {
@@ -407,7 +409,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}, env: NodeJS.Proce
 		configPaths: [file, ...(local === undefined ? [] : [local])].filter((source) => source.found).map((source) => source.path),
 		...(explicit ? { explicitConfigPath: file.path } : {}),
 		warnings,
-		storePath: pathFrom(storeRaw),
+		storePath: pathFrom(storeRaw, overrides.cwd),
 		provider: active.name,
 		providers: entries,
 		active,
@@ -429,7 +431,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}, env: NodeJS.Proce
 			enabled: mcpEnabled,
 			servers: envServers ?? raw.mcp?.servers ?? ["substrate"],
 			tools: envTools ?? raw.mcp?.tools ?? [],
-			...(mcpConfigRaw === undefined ? {} : { configPath: pathFrom(mcpConfigRaw) }),
+			...(mcpConfigRaw === undefined ? {} : { configPath: pathFrom(mcpConfigRaw, overrides.cwd) }),
 		},
 	};
 }
