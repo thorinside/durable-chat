@@ -246,6 +246,7 @@ export function printHelp(command: "main" | "jobs" = "main"): void {
 	line("durable-chat task cancel <id>    abort a job");
 	line("durable-chat watch [--follow]    live job board until jobs settle");
 	line("durable-chat acp                attach-only ACP stdio frontend for existing Main");
+	line("durable-chat acp list           running Mains as JSON, each with its --endpoint");
 	line("durable-chat compact [focus]     compact the main conversation");
 	line("durable-chat reset [handoff]     reset the main context");
 	line("durable-chat info                store, model, limits, tools, MCP status");

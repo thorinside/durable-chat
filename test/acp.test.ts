@@ -1,20 +1,29 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openRuntime } from "../src/harness.ts";
 import {
+	acpFrontend,
 	entryUpdates,
+	listMains,
 	mainSessionCheck,
 	ownerAddress,
 	readFrames,
 	SHARED_MAIN,
 } from "../src/acp.ts";
+
+// Endpoints of this run live apart from the user's own running dchat, which discovery must never probe here.
+const ipc = mkdtempSync("/tmp/dchat-acp-ipc-");
+process.env.DCHAT_IPC_DIR = ipc;
+process.on("exit", () => rmSync(ipc, { recursive: true, force: true }));
+const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
 function fixture() {
 	const directory = mkdtempSync(join(tmpdir(), "dchat-acp-"));
@@ -276,4 +285,63 @@ test("existing Main replays history and reflects TTY input while detach leaves i
 		runtime.context,
 	);
 	assert.equal((await afterDetach.wait(runtime.context)).status, "done");
+});
+
+// Discovery is what lets a client offer running Mains without being told a store or project first.
+test("a running Main is discoverable and attachable through its listed endpoint alone", {
+	timeout: 25_000,
+}, async (t) => {
+	const setup = fixture();
+	const runtime = await openRuntime({
+		configPath: setup.config,
+		withMcp: false,
+	});
+	t.after(async () => {
+		await runtime.close();
+		rmSync(setup.directory, { recursive: true, force: true });
+	});
+	const listed = await new Promise<string>((resolve, reject) =>
+		execFile(
+			process.execPath,
+			[cli, "acp", "list"],
+			{ timeout: 10_000, cwd: tmpdir() },
+			(error, stdout) => (error ? reject(error) : resolve(stdout)),
+		),
+	);
+	const { mains } = JSON.parse(listed);
+	assert.equal(mains.length, 1);
+	assert.equal(mains[0].endpoint, ownerAddress(setup.store));
+	assert.equal(mains[0].cwd, runtime.cwd);
+	assert.equal(mains[0].model, runtime.modelLabel);
+	// No --store or --config: the endpoint is the whole selection.
+	const frontend = spawn(
+		process.execPath,
+		[cli, "acp", "--endpoint", mains[0].endpoint],
+		{ cwd: tmpdir(), stdio: ["pipe", "pipe", "ignore"] },
+	);
+	t.after(() => frontend.kill());
+	const replies: any[] = [];
+	const answered = new Promise<void>((resolve) =>
+		readFrames(
+			frontend.stdout,
+			(frame) => {
+				replies.push(frame);
+				if (frame.id === "list") resolve();
+			},
+			() => {},
+		),
+	);
+	frontend.stdin.write(
+		`${JSON.stringify({ jsonrpc: "2.0", id: "initialize", method: "initialize", params: { protocolVersion: 1 } })}\n${JSON.stringify({ jsonrpc: "2.0", id: "list", method: "session/list", params: {} })}\n`,
+	);
+	await answered;
+	assert.equal(replies.at(-1).result.sessions[0].sessionId, mains[0].sessionId);
+	frontend.stdin.end();
+	await once(frontend, "exit");
+	await runtime.close();
+	assert.deepEqual(await listMains(), []);
+	await assert.rejects(
+		acpFrontend({ endpoint: join(setup.directory, "state.sqlite") }),
+		/Not a dchat owner endpoint/,
+	);
 });

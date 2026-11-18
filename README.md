@@ -76,10 +76,14 @@ normal dchat; it never opens another runtime, launches dchat, or forks state:
 dchat acp                 # standard ACP JSON-RPC over stdio; normally started by the runner
 # Explicit configuration is also supported:
 dchat acp --config /absolute/path/to/config.yaml
+# Discover every Main this user is running, then attach to one by its endpoint alone:
+dchat acp list            # {"mains":[{"endpoint","sessionId","cwd","title","model"}]}
+dchat acp --endpoint /tmp/dchat-<uid>/<id>.sock
 ```
 
 The socket lives in a private `/tmp/dchat-<uid>` directory regardless of `TMPDIR` or
-`XDG_RUNTIME_DIR`, so a frontend started by a service finds the terminal's owner. If the
+`XDG_RUNTIME_DIR`, so a frontend started by a service finds the terminal's owner; set
+`DCHAT_IPC_DIR` for both sides to move it. If the
 endpoint cannot be served, dchat itself still starts; `dchat info` reports ACP as unavailable
 and why.
 
