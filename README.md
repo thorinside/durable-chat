@@ -98,10 +98,27 @@ This is an attach-only ACP v1 profile: use advertised `session/list` and `sessio
 for complete replay. `session/resume` is not advertised in this first slice.
 `session/new`, client-supplied MCP servers and
 changes to the existing owner's model/instructions are refused explicitly. It is not
-claimed to satisfy every general ACP client's new-session/MCP expectations. Shared-Main
-metadata and request correlation are defined by `src/acp.ts`; no custom content RPC
-methods or ACP network listener are introduced. Existing tool/terminal permissions
-remain unchanged; the frontend never approves on the user's behalf.
+claimed to satisfy every general ACP client's new-session/MCP expectations, and adds no
+OAuth flow. Generic v1 clients can initialize, list, load and prompt the existing Main
+without private metadata. They receive committed public messages only, not token-by-token
+live previews: standard chunks append, and a different `messageId` does not replace an
+earlier message. Load replays the committed history; cancellation may commit a public
+partial answer, which is also replayed.
+
+The shared-Main extension opts into disposable live previews via
+`clientCapabilities._meta["io.github.thorinside.durable-chat/shared-main"].version: 1`
+at initialize. These clients must remove obsolete live IDs using `activeMessageId`
+metadata; the committed entry is authoritative. Other capability versions do not opt in.
+Both modes honor an optional prompt `_meta` under that same key containing `requestId`
+(a nonempty string, at most 128 characters), retaining the existing bounded recent-input
+retry deduplication. Without it, each prompt gets a fresh admission UUID: retries can
+create new input, even with the same JSON-RPC correlation ID. No standard retry guarantee
+is implied. Extension details are defined by `src/acp.ts`.
+
+This follows the [ACP stable v1 prompt/content contract](https://github.com/agentclientprotocol/agent-client-protocol/blob/dbff792240171b199b5ad24d01406720ac9e4bd3/schema/v1/schema.json)
+(schema source package 1.19.0; no ACP SDK dependency). No custom content RPC methods or
+ACP network listener are introduced. Existing tool/terminal permissions remain unchanged;
+the frontend never approves on the user's behalf.
 
 ## Future wake-ups
 

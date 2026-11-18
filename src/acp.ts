@@ -307,6 +307,7 @@ export async function serveMain(
 	const server = createServer((socket) => {
 		sockets.add(socket);
 		let initialized = false;
+		let sharedMain = false;
 		let loaded = false;
 		let detach: (() => void) | undefined;
 		let loading = false;
@@ -339,10 +340,12 @@ export async function serveMain(
 			const live = value.docs["pi.live"] as RecordValue | undefined;
 			latestRun = live?.run ? String(live.run.taskId) : null;
 			const generation = live?.generation;
-			const activeMessageId = generation?.message
+			const activeMessageId = sharedMain && generation?.message
 				? `live:${latestRun}:${generation.attempt}`
 				: null;
-			if (generation?.message) {
+			// Live IDs are disposable only in the negotiated shared-Main profile. Standard
+			// ACP chunks append (even with messageId), so generic peers get committed entries only.
+			if (sharedMain && generation?.message) {
 				const id = `live:${latestRun}:${generation.attempt}`;
 				const current = text(generation.message.content);
 				const before = chunks.get(id) ?? "";
@@ -464,6 +467,7 @@ export async function serveMain(
 				if (method === "initialize") {
 					if (initialized) throw new Error("Already initialized");
 					initialized = true;
+					sharedMain = params.clientCapabilities?._meta?.[SHARED_MAIN]?.version === 1;
 					reply({
 						protocolVersion: 1,
 						agentInfo: { name: "durable-chat", version: "1.0.0" },
@@ -552,10 +556,13 @@ export async function serveMain(
 						);
 					})
 					.join("\n");
-				const key = params._meta?.[SHARED_MAIN]?.requestId;
+				const suppliedKey = params._meta?.[SHARED_MAIN]?.requestId;
+				// JSON-RPC IDs correlate replies, not durable retries. Without an extension key,
+				// each prompt admission is new input, even when the caller reuses its RPC ID.
+				const key = suppliedKey === undefined ? randomUUID() : suppliedKey;
 				if (typeof key !== "string" || key.length > 128 || !key)
 					throw Object.assign(
-						new Error("A shared-main requestId is required for safe admission"),
+						new Error("shared-main requestId must be a nonempty string of at most 128 characters"),
 						{ rpcCode: -32602 },
 					);
 				if (content.length > 100_000)
