@@ -3,12 +3,13 @@ import {
 	chmodSync,
 	lstatSync,
 	mkdirSync,
+	readdirSync,
 	realpathSync,
 	statSync,
 	unlinkSync,
 } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { LiveDoc, defineDoc } from "@earendil-works/pi-durable";
 import type {
 	ConversationView,
@@ -45,12 +46,14 @@ const Requests = defineDoc<{
 const hash = (value: string) =>
 	createHash("sha256").update(value).digest("hex");
 
+const ENDPOINT_NAME = /^[0-9a-f]{24}\.sock$/;
+
 /**
- * Deterministic per-DB rendezvous, not cwd/process discovery. Never opens storage.
- * The owner and a frontend started by another service must agree without sharing an environment,
- * so the location never depends on TMPDIR or XDG_RUNTIME_DIR; the directory is private and checked.
+ * The private directory holding every owner's endpoint for this user. The owner and a frontend started
+ * by another service must agree without sharing an environment, so the location never depends on TMPDIR
+ * or XDG_RUNTIME_DIR; DCHAT_IPC_DIR is the one explicit override. The directory is private and checked.
  */
-export function ownerAddress(store: string, directory = "/tmp"): string {
+function ownerDirectory(directory = process.env.DCHAT_IPC_DIR || "/tmp"): string {
 	const uid = process.getuid?.();
 	if (uid === undefined)
 		throw new Error("Local ACP attachment requires Unix user isolation");
@@ -68,7 +71,101 @@ export function ownerAddress(store: string, directory = "/tmp"): string {
 		(info.mode & 0o077) !== 0
 	)
 		throw new Error("Unsafe dchat IPC directory");
-	return join(base, `${hash(realpathSync(resolve(store))).slice(0, 24)}.sock`);
+	return base;
+}
+
+/** Deterministic per-DB rendezvous, not cwd/process discovery. Never opens storage. */
+export function ownerAddress(store: string, directory?: string): string {
+	return join(
+		ownerDirectory(directory),
+		`${hash(realpathSync(resolve(store))).slice(0, 24)}.sock`,
+	);
+}
+
+function assertOwnerSocket(address: string): void {
+	const stat = lstatSync(address);
+	if (
+		!stat.isSocket() ||
+		stat.uid !== process.getuid!() ||
+		(stat.mode & 0o077) !== 0
+	)
+		throw new Error("Unsafe dchat owner socket");
+}
+
+export type ListedMain = {
+	/** Pass to `dchat acp --endpoint` to attach to exactly this owner. */
+	endpoint: string;
+	sessionId: string;
+	cwd: string;
+	title: string;
+	model?: string;
+};
+
+/** Ask one endpoint which Main it serves. A dead or silent endpoint has none. */
+function probeMain(endpoint: string): Promise<ListedMain[]> {
+	return new Promise((resolve) => {
+		let socket: Socket;
+		const finish = (mains: ListedMain[]) => {
+			socket?.destroy();
+			resolve(mains);
+		};
+		try {
+			assertOwnerSocket(endpoint);
+			socket = createConnection(endpoint);
+		} catch {
+			resolve([]);
+			return;
+		}
+		socket.setTimeout(1500, () => finish([]));
+		socket.once("error", () => finish([]));
+		socket.once("close", () => finish([]));
+		readFrames(
+			socket,
+			(message) => {
+				if (message.id !== "list") return;
+				const sessions = (message.result as RecordValue | undefined)?.sessions;
+				finish(
+					Array.isArray(sessions)
+						? sessions.flatMap((session: RecordValue) =>
+								typeof session?.sessionId === "string" &&
+								typeof session.cwd === "string"
+									? [
+											{
+												endpoint,
+												sessionId: session.sessionId,
+												cwd: session.cwd,
+												title:
+													typeof session.title === "string"
+														? session.title
+														: "dchat Main",
+												...(typeof session._meta?.[SHARED_MAIN]?.model === "string"
+													? { model: session._meta[SHARED_MAIN].model }
+													: {}),
+											},
+										]
+									: [],
+							)
+						: [],
+				);
+			},
+			() => finish([]),
+		);
+		socket.write(
+			`${JSON.stringify({ jsonrpc: "2.0", id: "initialize", method: "initialize", params: { protocolVersion: 1 } })}\n${JSON.stringify({ jsonrpc: "2.0", id: "list", method: "session/list", params: {} })}\n`,
+		);
+	});
+}
+
+/** Every Main this user is running right now, found through the owners' endpoints. Never opens storage. */
+export async function listMains(directory?: string): Promise<ListedMain[]> {
+	const base = ownerDirectory(directory);
+	const found = await Promise.all(
+		readdirSync(base)
+			.filter((name) => ENDPOINT_NAME.test(name))
+			.sort()
+			.map((name) => probeMain(join(base, name))),
+	);
+	return found.flat();
 }
 
 export function readFrames(
@@ -389,7 +486,14 @@ export async function serveMain(
 						sessions:
 							params.cwd && params.cwd !== runtime.cwd
 								? []
-								: [{ sessionId, cwd: runtime.cwd, title: "dchat Main" }],
+								: [
+										{
+											sessionId,
+											cwd: runtime.cwd,
+											title: "dchat Main",
+											_meta: { [SHARED_MAIN]: { model: runtime.modelLabel } },
+										},
+									],
 					});
 					return;
 				}
@@ -566,19 +670,23 @@ export async function serveMain(
 	};
 }
 
-/** Stdio frontend: config resolution + private pipe only; deliberately has no openRuntime dependency. */
+/**
+ * Stdio frontend: a private pipe only; deliberately has no openRuntime dependency. With `endpoint` it
+ * attaches to exactly the owner `listMains` reported; otherwise to the owner of the configured store.
+ */
 export async function acpFrontend(
-	options: { store?: string; configPath?: string } = {},
+	options: { store?: string; configPath?: string; endpoint?: string } = {},
 ): Promise<void> {
-	const config = resolveConfig(options);
-	const address = ownerAddress(config.storePath);
-	const stat = lstatSync(address);
-	if (
-		!stat.isSocket() ||
-		stat.uid !== process.getuid!() ||
-		(stat.mode & 0o077) !== 0
-	)
-		throw new Error("Unsafe dchat owner socket");
+	let address: string;
+	if (options.endpoint !== undefined) {
+		address = resolve(options.endpoint);
+		if (
+			dirname(address) !== ownerDirectory() ||
+			!ENDPOINT_NAME.test(basename(address))
+		)
+			throw new Error("Not a dchat owner endpoint");
+	} else address = ownerAddress(resolveConfig(options).storePath);
+	assertOwnerSocket(address);
 	const socket = createConnection(address);
 	await new Promise<void>((resolve, reject) => {
 		socket.once("connect", resolve);

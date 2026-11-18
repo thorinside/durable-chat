@@ -33,6 +33,7 @@ const OPTIONS = {
 	provider: { type: "string" as const },
 	model: { type: "string" as const },
 	config: { type: "string" as const },
+	endpoint: { type: "string" as const },
 	force: { type: "boolean" as const, default: false },
 	local: { type: "boolean" as const, default: false },
 	plain: { type: "boolean" as const, default: false },
@@ -338,8 +339,16 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (command === "acp") {
-		const { acpFrontend } = await import("./acp.ts");
-		await acpFrontend({ ...(values.store === undefined ? {} : { store: values.store }), ...(values.config === undefined ? {} : { configPath: values.config }) });
+		const { acpFrontend, listMains } = await import("./acp.ts");
+		if (positionals[1] === "list") {
+			process.stdout.write(`${JSON.stringify({ mains: await listMains() })}\n`);
+			return;
+		}
+		await acpFrontend({
+			...(values.store === undefined ? {} : { store: values.store }),
+			...(values.config === undefined ? {} : { configPath: values.config }),
+			...(values.endpoint === undefined ? {} : { endpoint: values.endpoint }),
+		});
 		return;
 	}
 	const noMcp = values["no-mcp"] === true;
