@@ -178,6 +178,14 @@ export function formatEntry(entry: EntryRecord, options: EntryFormatOptions): st
 export function formatEntryLines(entry: EntryRecord, options: EntryFormatOptions): TranscriptLine[] {
 	const width = Math.max(8, options.width);
 	const messages = (entry.model ?? []) as readonly Message[];
+	if (entry.kind === "app.agent-message") {
+		const data = entry.data as { origin?: { principalKind?: string; principalId?: string } } | undefined;
+		const author = data?.origin;
+		return [
+			transcriptLine(dim(truncateToWidth(`── agent · substrate/${author?.principalKind ?? "unknown"}:${author?.principalId ?? "unknown"}`, width, ""))),
+			...messages.flatMap((message) => prefixLines(blockText(message.content), " agent ", width, ACCENT)),
+		];
+	}
 	if (entry.kind === "pi.user") {
 		return messages.flatMap((message) => prefixLines(blockText(message.content), " you  ", width, ACCENT));
 	}
