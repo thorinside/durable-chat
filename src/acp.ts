@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
 	chmodSync,
 	lstatSync,
@@ -19,7 +19,7 @@ import type {
 import { resolveConfig } from "./config.ts";
 import type { AppRuntime } from "./harness.ts";
 import { PACKAGE_VERSION } from "./version.ts";
-import { AGENT_MESSAGE_KIND, AGENT_MESSAGING_VERSION, MAX_AGENT_REQUESTS, agentRequestScope, decodeMainCursor, encodeMainCursor, mainReadEntry, mainStatus, parseAgentAttachment, parseMainRead } from "./main-agent.ts";
+import { AGENT_MESSAGE_KIND, AGENT_MESSAGING_VERSION, MAX_AGENT_REQUESTS, agentMessageInput, agentRequestScope, decodeMainCursor, encodeMainCursor, mainReadEntry, mainStatus, parseAgentAttachment, parseMainRead } from "./main-agent.ts";
 
 export const SHARED_MAIN = "io.github.thorinside.durable-chat/shared-main";
 const MAX_FRAME = 4 * 1024 * 1024;
@@ -288,6 +288,8 @@ export async function serveMain(
 	const db = statSync(runtime.storePath);
 	const sessionId = `main:${hash(`${realpathSync(runtime.storePath)}:${db.ino}:${db.birthtimeMs}`).slice(0, 32)}`;
 	const runtimeId = randomUUID();
+	// The public runtime ID identifies the owner for cancellation, not for signing cursors.
+	const cursorSecret = randomBytes(32);
 	const sockets = new Set<Socket>();
 	// Only called after acquiring the store's exclusive owner lock. A prior owner's stale socket is not another runtime.
 	try {
@@ -561,9 +563,9 @@ export async function serveMain(
 					const { limit, cursor } = parseMainRead(params);
 					const scope = `${sessionId}:${JSON.stringify(agent.origin)}`;
 					const page = await runtime.root.entries({ order: "ascending" }, limit,
-						cursor === undefined ? undefined : decodeMainCursor(cursor, runtimeId, scope), runtime.context);
+						cursor === undefined ? undefined : decodeMainCursor(cursor, cursorSecret, scope), runtime.context);
 					reply({ entries: page.items.flatMap(mainReadEntry), untrusted: true,
-						...(page.next === undefined ? {} : { nextCursor: encodeMainCursor(page.next, runtimeId, scope) }) });
+						...(page.next === undefined ? {} : { nextCursor: encodeMainCursor(page.next, cursorSecret, scope) }) });
 					return;
 				}
 				if (method === "session/cancel") {
@@ -615,6 +617,7 @@ export async function serveMain(
 					);
 				const origin = agent?.origin;
 				const scope = origin ? agentRequestScope(origin) : undefined;
+				// Hash caller-supplied text, not its model-facing label, so existing receipts still match.
 				const fingerprint = scope ? hash(JSON.stringify({ content, scope })) : hash(content);
 				const receiptKey = scope ? `${hash(JSON.stringify(scope))}:${key}` : key;
 				let submissionId = 0;
@@ -630,7 +633,7 @@ export async function serveMain(
 						Number(
 							await runtime.root.submit(tx, {
 								type: "input",
-								content,
+								content: origin ? agentMessageInput(origin, content) : content,
 								whenBusy: "followUp",
 								requestId: origin ? `agent:${receiptKey}` : `acp:${key}`,
 								...(origin ? { entry: { kind: AGENT_MESSAGE_KIND, data: { origin, requestId: key } } } : {}),

@@ -4,6 +4,7 @@ import { backgroundAnsi, indexedColor, styleText, stripTerminalSequences, trunca
 import type { MarkdownTheme, TextAttributes } from "@earendil-works/pi-tui";
 import type { EntryRecord, UsageState } from "@earendil-works/pi-durable";
 import { formatDuration } from "../format.ts";
+import { AGENT_MESSAGE_KIND, agentMessageBody, type AgentOrigin } from "../main-agent.ts";
 import { renderCopyableMarkdown, type CodeCopySpan } from "./markdown-copy.ts";
 
 /** Display paths beneath home with `~`, keeping sibling directories and other roots absolute. */
@@ -178,12 +179,13 @@ export function formatEntry(entry: EntryRecord, options: EntryFormatOptions): st
 export function formatEntryLines(entry: EntryRecord, options: EntryFormatOptions): TranscriptLine[] {
 	const width = Math.max(8, options.width);
 	const messages = (entry.model ?? []) as readonly Message[];
-	if (entry.kind === "app.agent-message") {
-		const data = entry.data as { origin?: { principalKind?: string; principalId?: string } } | undefined;
-		const author = data?.origin;
+	if (entry.kind === AGENT_MESSAGE_KIND) {
+		const author = (entry.data as { origin?: AgentOrigin } | undefined)?.origin;
 		return [
 			transcriptLine(dim(truncateToWidth(`── agent · substrate/${author?.principalKind ?? "unknown"}:${author?.principalId ?? "unknown"}`, width, ""))),
-			...messages.flatMap((message) => prefixLines(blockText(message.content), " agent ", width, ACCENT)),
+			...(entry.model ?? []).flatMap((message) => message.role === "user"
+				? prefixLines(blockText(agentMessageBody(message.content, author)), " agent ", width, ACCENT)
+				: []),
 		];
 	}
 	if (entry.kind === "pi.user") {

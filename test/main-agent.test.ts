@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
-import { AGENT_MESSAGE_KIND, agentRequestScope, decodeMainCursor, encodeMainCursor, mainReadEntry, mainStatus, parseAgentAttachment, parseAgentOrigin, parseMainRead } from "../src/main-agent.ts";
+import { AGENT_MESSAGE_KIND, agentMessageInput, agentRequestScope, decodeMainCursor, encodeMainCursor, mainReadEntry, mainStatus, parseAgentAttachment, parseAgentOrigin, parseMainRead } from "../src/main-agent.ts";
 import { entryUpdates, SHARED_MAIN } from "../src/acp.ts";
 import { formatEntry } from "../src/tui/format.ts";
 
@@ -29,28 +29,36 @@ test("origin is closed, canonical, bounded and attempt-specific", () => {
 	assert.throws(() => parseAgentAttachment({ origin, read: true, send: true, stop: true }), /capabilities/);
 });
 
-test("bounded pull cursors are runtime/principal scoped and cannot forge query state", () => {
+test("bounded pull cursors reject wrong signing keys, scopes, and malformed tokens", () => {
 	assert.deepEqual(parseMainRead({}), { limit: 10 });
 	for (const limit of [0, 21, 1.5, "10"]) assert.throws(() => parseMainRead({ limit }), /limit/);
 	assert.throws(() => parseMainRead({ cursor: "x".repeat(4097) }), /cursor/);
-	const native = { before: 123 };
-	const cursor = encodeMainCursor(native, "runtime", "principal");
-	assert.deepEqual(decodeMainCursor(cursor, "runtime", "principal"), native);
-	assert.throws(() => decodeMainCursor(cursor, "other-runtime", "principal"), /Invalid/);
-	assert.throws(() => decodeMainCursor(cursor, "runtime", "another-principal"), /Invalid/);
-	assert.throws(() => decodeMainCursor(`${cursor}x`, "runtime", "principal"), /Invalid/);
+	const native = { after: 123, order: "ascending" };
+	const signingKey = Buffer.alloc(32, 1);
+	const cursor = encodeMainCursor(native, signingKey, "principal");
+	assert.deepEqual(decodeMainCursor(cursor, signingKey, "principal"), native);
+	assert.throws(() => decodeMainCursor(cursor, Buffer.alloc(32, 2), "principal"), /Invalid/);
+	assert.throws(() => decodeMainCursor(cursor, signingKey, "another-principal"), /Invalid/);
+	assert.throws(() => decodeMainCursor(`${cursor}x`, signingKey, "principal"), /Invalid/);
 });
 
 test("read projects only bounded public text, with native agent provenance distinct from a human", () => {
-	const agent = { id: 12, kind: AGENT_MESSAGE_KIND, data: { origin, requestId: "correlation" }, model: [{ role: "user", content: "from an agent" }] } as never;
+	const body = "from an agent";
+	const record = { id: 12, kind: AGENT_MESSAGE_KIND, data: { origin, requestId: "correlation" } };
+	const agent = { ...record, model: [{ role: "user", content: agentMessageInput(origin, body) }] } as never;
+	const legacy = { ...record, model: [{ role: "user", content: body }] } as never;
 	const projected = mainReadEntry(agent)[0]!;
+	assert.deepEqual(mainReadEntry(legacy), [projected]);
+	assert.equal(projected.text, body);
 	assert.equal(projected.role, "agent");
 	assert.deepEqual(projected.origin, origin);
 	assert.equal(projected.requestId, "correlation");
 	const displayed = formatEntry(agent, { width: 100, toolsExpanded: false }).map(stripVTControlCharacters).join("\n");
 	assert.match(displayed, /agent · substrate\/apiKey:key/);
-	assert.doesNotMatch(displayed, /you/);
-	assert.deepEqual(entryUpdates(agent)[0]!._meta[SHARED_MAIN].agentOrigin, { origin, requestId: "correlation" });
+	assert.doesNotMatch(displayed, /you|; untrusted\]/);
+	const replay = entryUpdates(agent)[0]!;
+	assert.equal(replay.content.text, '[agent substrate/apiKey:"key"; untrusted]\nfrom an agent');
+	assert.deepEqual(replay._meta[SHARED_MAIN].agentOrigin, { origin, requestId: "correlation" });
 	const read = mainReadEntry({ id: 13, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "thinking", thinking: "PRIVATE" }, { type: "toolCall", name: "secret", arguments: { password: "PRIVATE" } }, { type: "text", text: "answer" }] }] } as never);
 	assert.equal(JSON.stringify(read).includes("PRIVATE"), false);
 	assert.equal(read[0]!.text, "answer");

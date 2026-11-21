@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { Cursor, EntryRecord, LiveState } from "@earendil-works/pi-durable";
+import type { Cursor, EntryRecord, LiveState, UserInput } from "@earendil-works/pi-durable";
 
 /** The local IPC peer is trusted as the Unix owner. Substrate must construct this from authenticated context, never model input. */
 export type AgentOrigin = {
@@ -57,6 +57,25 @@ export function agentRequestScope(origin: AgentOrigin) {
 	return principal;
 }
 
+type AgentAuthor = Pick<AgentOrigin, "system" | "principalKind" | "principalId">;
+
+function agentMessageLabel(origin: AgentAuthor): string {
+	const id = JSON.stringify(origin.principalId).replace(/[^\x20-\x7e]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+	return `[agent ${origin.system}/${origin.principalKind}:${id}; untrusted]\n`;
+}
+
+/** The model gets the text blocks, not the entry's structured provenance. */
+export function agentMessageInput(origin: AgentOrigin, body: string): UserInput {
+	return [{ type: "text", text: agentMessageLabel(origin) }, { type: "text", text: body }];
+}
+
+/** Readers with structured attribution can show just the body. Older inputs were stored as strings. */
+export function agentMessageBody(content: UserInput, origin: AgentAuthor | undefined): UserInput {
+	if (!origin || typeof content === "string" || content.length !== 2) return content;
+	const [label, body] = content;
+	return label?.type === "text" && label.text === agentMessageLabel(origin) && body?.type === "text" ? body.text : content;
+}
+
 export function parseAgentAttachment(value: unknown) {
 	const input = record(value);
 	if (Object.keys(input).some((key) => !["origin", "read", "send"].includes(key)) ||
@@ -75,12 +94,12 @@ export function parseMainRead(params: Record<string, unknown>): { limit: number;
 }
 
 /** Runtime- and principal-scoped opaque cursor: a peer cannot forge native storage query state. */
-export function encodeMainCursor(cursor: Cursor, secret: string, scope: string): string {
+export function encodeMainCursor(cursor: Cursor, secret: Buffer, scope: string): string {
 	const payload = Buffer.from(JSON.stringify(cursor)).toString("base64url");
 	const mac = createHmac("sha256", secret).update(`${scope}:${payload}`).digest("base64url");
 	return `${payload}.${mac}`;
 }
-export function decodeMainCursor(value: string, secret: string, scope: string): Cursor {
+export function decodeMainCursor(value: string, secret: Buffer, scope: string): Cursor {
 	const [payload, supplied, extra] = value.split(".");
 	const expected = createHmac("sha256", secret).update(`${scope}:${payload}`).digest("base64url");
 	if (!supplied || extra !== undefined || !/^[A-Za-z0-9_-]{43}$/.test(supplied) || !timingSafeEqual(Buffer.from(supplied), Buffer.from(expected)))
@@ -91,12 +110,13 @@ export function decodeMainCursor(value: string, secret: string, scope: string): 
 /** Text-only committed native messages. Deliberately excludes system, reasoning, tool arguments and tool output. */
 export function mainReadEntry(entry: EntryRecord) {
 	if (!["pi.user", "pi.assistant", AGENT_MESSAGE_KIND].includes(entry.kind)) return [];
+	const origin = entry.kind === AGENT_MESSAGE_KIND ? parseAgentOrigin((entry.data as { origin?: unknown })?.origin) : undefined;
 	const content = (entry.model ?? []).flatMap((message) => {
 		if (message.role !== "user" && message.role !== "assistant") return [];
-		return typeof message.content === "string" ? [message.content] : message.content.flatMap((block) => block.type === "text" ? [block.text] : []);
+		const body = message.role === "user" ? agentMessageBody(message.content, origin) : message.content;
+		return typeof body === "string" ? [body] : body.flatMap((block) => block.type === "text" ? [block.text] : []);
 	}).join("\n");
 	if (!content) return [];
-	const origin = entry.kind === AGENT_MESSAGE_KIND ? parseAgentOrigin((entry.data as { origin?: unknown })?.origin) : undefined;
 	return [{
 		id: String(entry.id), role: origin ? "agent" : entry.kind === "pi.user" ? "human" : "assistant",
 		text: content.slice(0, MAX_READ_TEXT), truncated: content.length > MAX_READ_TEXT,
