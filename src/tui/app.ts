@@ -35,6 +35,7 @@ import { TranscriptSelection } from "./selection.ts";
 import { createTextCopier, copyNotice, type CopyText } from "./clipboard.ts";
 import { openBrowser } from "./browser.ts";
 import { Composer, isComposerNewline, isComposerQueue } from "./composer.ts";
+import type { MainAccessPromptDecision, MainAccessPromptRequest } from "../main-agent.ts";
 
 const FLASH_MS = 5000;
 const QUIT_REPEAT_MS = 1500;
@@ -151,6 +152,12 @@ export class Dashboard implements Component {
 	private quitRequested = false;
 	private quitArmedAt: number | undefined;
 	private quitArmTimer: NodeJS.Timeout | undefined;
+	private accessPrompts: Array<{
+		request: MainAccessPromptRequest;
+		resolve: (decision: MainAccessPromptDecision) => void;
+		signal: AbortSignal;
+		onAbort: () => void;
+	}> = [];
 
 	constructor(options: DashboardOptions) {
 		this.copyText = options.copySelection ?? createTextCopier();
@@ -192,6 +199,7 @@ export class Dashboard implements Component {
 		this.clock.unref?.();
 		// Resume pending work and continue interrupted phases from the previous process.
 		this.runtime.harness.resume();
+		this.runtime.onAccessRequest = (request, signal) => this.enqueueAccessPrompt(request, signal);
 		this.started = true;
 		if (this.runtime.previousStateArchive !== undefined) this.flash(`Previous state archive: ${this.runtime.previousStateArchive}`);
 		if (this.initialNotice !== undefined) this.flash(this.initialNotice.text, this.initialNotice.error === true ? "error" : "info");
@@ -202,6 +210,11 @@ export class Dashboard implements Component {
 		this.selection.reset();
 		this.started = false;
 		this.stopping = true;
+		this.runtime.onAccessRequest = undefined;
+		for (const item of this.accessPrompts.splice(0)) {
+			item.signal.removeEventListener("abort", item.onAbort);
+			item.resolve({ decision: "denied" });
+		}
 		this.displayVersion++;
 		this.displayCancel?.();
 		this.modelController?.abort();
@@ -227,6 +240,40 @@ export class Dashboard implements Component {
 
 	private now(): number {
 		return Date.now();
+	}
+
+	private enqueueAccessPrompt(request: MainAccessPromptRequest, signal: AbortSignal): Promise<MainAccessPromptDecision> {
+		if (signal.aborted || this.stopping) return Promise.resolve({ decision: "denied" });
+		return new Promise<MainAccessPromptDecision>((resolve) => {
+			const entry = {
+				request,
+				resolve,
+				signal,
+				onAbort: () => {
+					const index = this.accessPrompts.indexOf(entry);
+					if (index >= 0) this.accessPrompts.splice(index, 1);
+					resolve({ decision: "denied" });
+					this.renderSoon();
+				},
+			};
+			signal.addEventListener("abort", entry.onAbort, { once: true });
+			this.accessPrompts.push(entry);
+			this.renderSoon();
+		});
+	}
+
+	private settleAccessPrompt(approved: boolean): void {
+		const current = this.accessPrompts.shift();
+		if (!current) return;
+		current.signal.removeEventListener("abort", current.onAbort);
+		if (approved) {
+			current.resolve({ decision: "approved", capabilities: { ...current.request.requested } });
+			this.flash(`Approved Main access for ${current.request.requester.label}.`);
+		} else {
+			current.resolve({ decision: "denied" });
+			this.flash(`Denied Main access for ${current.request.requester.label}.`);
+		}
+		this.renderSoon();
 	}
 
 	private onGraph(graph: TaskGraph): void {
@@ -1104,6 +1151,31 @@ export class Dashboard implements Component {
 			...composer,
 			this.renderHint(width),
 		].slice(0, height);
+		if (this.accessPrompts.length > 0) {
+			const { request } = this.accessPrompts[0]!;
+			const caps = [
+				request.requested.status ? "status" : null,
+				request.requested.read ? "read messages" : null,
+				request.requested.send ? "send messages" : null,
+			].filter(Boolean);
+			const who = request.requester.sessionTitle
+				? `${request.requester.label} ("${request.requester.sessionTitle}")`
+				: request.requester.label;
+			const lines = [
+				`${who} wants to access this Main.`,
+				`Requested access: ${caps.join(", ")}`,
+				...(request.reason ? [`Reason: ${request.reason}`] : []),
+				"Approving lets this connection keep using this Main until revoked.",
+			];
+			const queueNote = this.accessPrompts.length > 1 ? ` (+${this.accessPrompts.length - 1} waiting)` : "";
+			return overlayDialog(
+				frame,
+				width,
+				`Allow Main access?${queueNote}`,
+				lines.join("\n"),
+				"Y / Enter approve · N / Esc deny",
+			);
+		}
 		if (this.state.mode === "confirmRollback") return overlayDialog(frame, width, "Rollback all state?",
 			`Restore from ${this.pendingRollbackSource}. Current state will be archived first; the selected file stays unchanged. Restored jobs resume. Project files and worktrees stay in place.`,
 			"Y restore · Enter / N / Esc cancel");
@@ -1299,6 +1371,7 @@ export class Dashboard implements Component {
 	private renderComposer(width: number): string[] {
 		const prefix = truncateToWidth(` ${this.composerPrefix()}`, Math.max(0, width - 3), "");
 		const active = this.state.focus === "composer"
+			&& this.accessPrompts.length === 0
 			&& this.state.mode !== "help"
 			&& this.state.mode !== "inspector"
 			&& !this.state.mode.startsWith("confirm");
@@ -1316,6 +1389,7 @@ export class Dashboard implements Component {
 		let hint: string;
 		const separator = dim(" · ");
 		if (this.quitArmedAt !== undefined && this.now() - this.quitArmedAt < QUIT_REPEAT_MS) hint = shortcut("CTRL-C", "again to quit");
+		else if (this.accessPrompts.length > 0) hint = [shortcut("Y / ENTER", "approve"), shortcut("N / ESC", "deny")].join(separator);
 		else if (this.state.mode === "help") hint = shortcut("ANY KEY", "closes help");
 		else if (this.state.mode === "inspector") hint = [shortcut("E", "edit config"), shortcut("ESC", "closes"), fg("edits apply after restart", MUTED)].join(separator);
 		else if (this.state.mode === "model") hint = [shortcut("↑ / ↓", "select"), shortcut("ENTER", "apply to all agents"), shortcut("ESC", "cancel")].join(separator);
@@ -1484,6 +1558,11 @@ export class Dashboard implements Component {
 			return;
 		}
 		this.disarmQuit();
+		if (this.accessPrompts.length > 0) {
+			if (data === "y" || data === "Y" || matchesKey(data, "enter")) this.settleAccessPrompt(true);
+			else if (data === "n" || data === "N" || matchesKey(data, "escape")) this.settleAccessPrompt(false);
+			return;
+		}
 		if (this.state.mode === "help") {
 			this.state.mode = "chat";
 			this.renderSoon();

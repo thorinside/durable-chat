@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
-import { AGENT_MESSAGE_KIND, agentMessageInput, agentRequestScope, decodeMainCursor, encodeMainCursor, mainReadEntry, mainStatus, parseAgentAttachment, parseAgentOrigin, parseMainRead } from "../src/main-agent.ts";
+import { AGENT_MESSAGE_KIND, agentMessageBody, agentMessageInput, agentRequestScope, decodeMainCursor, encodeMainCursor, mainReadEntry, mainStatus, parseAccessRequest, parseAgentAttachment, parseAgentOrigin, parseMainRead } from "../src/main-agent.ts";
 import { entryUpdates, SHARED_MAIN } from "../src/acp.ts";
 import { formatEntry } from "../src/tui/format.ts";
 
@@ -66,4 +66,41 @@ test("read projects only bounded public text, with native agent provenance disti
 	const bounded = mainReadEntry({ id: 14, kind: "pi.user", model: [{ role: "user", content: "x".repeat(3000) }] } as never)[0]!;
 	assert.equal(bounded.text.length, 2000);
 	assert.equal(bounded.truncated, true);
+});
+
+test("owner chat messages get authorized-owner-chat framing, latest read order, and closed access-request parsing", () => {
+	const chatOrigin = { ...origin, principalKind: "chat", principalId: "session-1" } as const;
+	const input = agentMessageInput(chatOrigin, "how are tests looking?");
+	assert.deepEqual(input, [
+		{ type: "text", text: '[agent substrate/chat:"session-1"; authorized owner chat]\n' },
+		{ type: "text", text: "how are tests looking?" },
+	]);
+	assert.equal(agentMessageBody(input, chatOrigin), "how are tests looking?");
+	assert.deepEqual(parseMainRead({ order: "latest", limit: 5 }), { limit: 5, order: "latest" });
+	assert.throws(() => parseMainRead({ order: "latest", cursor: "abc" }), /Cannot combine/);
+	assert.throws(() => parseMainRead({ order: "descending" }), /order/);
+	const parsed = parseAccessRequest({
+		requester: {
+			label: "Voice chat",
+			principalKind: "chat",
+			principalId: "session-1",
+			sessionTitle: "Morning sync",
+			workspaceId: "ws-1",
+			projectId: "proj-1",
+			projectName: "substrate",
+		},
+		requested: { status: true, read: true, send: true },
+		reason: "Check Main status",
+	});
+	assert.equal(parsed.requester.label, "Voice chat");
+	assert.equal(parsed.requester.sessionTitle, "Morning sync");
+	assert.deepEqual(parsed.requested, { status: true, read: true, send: true });
+	assert.throws(
+		() =>
+			parseAccessRequest({
+				requester: parsed.requester,
+				requested: { status: false, read: false, send: false },
+			}),
+		/at least one/,
+	);
 });

@@ -29,6 +29,7 @@ import { installRollbackSnapshot, rollbackSource } from "./rollback.ts";
 import { defaultModelId, modelChoices, selectModel, type ModelChoice, type ModelChoices } from "./models.ts";
 import { RebootArchive, rebootClosedStore } from "./reboot.ts";
 import { openAiCatalog } from "./openai-models.ts";
+import type { MainAccessPromptDecision, MainAccessPromptRequest } from "./main-agent.ts";
 
 type FauxResponder = ReturnType<typeof createFauxResponder>;
 
@@ -197,6 +198,8 @@ export type AppRuntime = {
 	mcpNotes: string[];
 	/** Why this runtime serves no ACP attachment; absent while it does. */
 	acpError?: string;
+	/** Optional interactive terminal handler for in-window Approve/Deny Main access prompts. */
+	onAccessRequest?: (request: MainAccessPromptRequest, signal: AbortSignal) => Promise<MainAccessPromptDecision>;
 	mcpAttempted: boolean;
 	mcpConnected: boolean;
 	tasksExtension: Extension;

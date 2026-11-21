@@ -135,4 +135,55 @@ test("local agent leases do not load/subscribe or cancel; attributed admission d
 	const readOnly = await connect();
 	await readOnly.request("session/attach", { sessionId, _meta: { [SHARED_MAIN]: { agent: { origin, read: true, send: false } } } });
 	await assert.rejects(readOnly.request("session/prompt", prompt), /send capability/);
+
+	// Native order:"latest" returns the newest messages without walking from entry 0,
+	// and session/prompt returns nextCursor anchored right after the sent message.
+	const chatOrigin = { ...origin, principalKind: "chat", principalId: "owner-chat-1" };
+	const chatPeer = await connect();
+	await chatPeer.request("session/attach", {
+		sessionId,
+		_meta: { [SHARED_MAIN]: { agent: { origin: chatOrigin, read: true, send: true } } },
+	});
+	const latestBefore = await chatPeer.request("session/read", { sessionId, limit: 2, order: "latest" });
+	assert.equal(latestBefore.untrusted, true);
+	assert.ok(latestBefore.entries.length >= 1);
+	const followUpId = randomUUID();
+	const sent = await chatPeer.request("session/prompt", {
+		sessionId,
+		prompt: [{ type: "text", text: "quick status check" }],
+		_meta: { [SHARED_MAIN]: { requestId: followUpId } },
+	});
+	const replyCursor = sent._meta[SHARED_MAIN].nextCursor;
+	assert.equal(typeof replyCursor, "string");
+	await runtime.root.waitForIdle(runtime.context);
+	const afterSend = await chatPeer.request("session/read", { sessionId, limit: 10, cursor: replyCursor });
+	assert.equal(afterSend.untrusted, true);
+	assert.ok(afterSend.entries.some((entry: any) => entry.role === "assistant"), "reply after sent message is returned");
+	assert.ok(!afterSend.entries.some((entry: any) => entry.requestId === followUpId), "anchored cursor skips the sent message itself");
+	assert.ok(!afterSend.entries.some((entry: any) => entry.requestId === requestId), "anchored cursor skips earlier backlog");
+
+	// In-window access prompt: advertised only when runtime.onAccessRequest is attached.
+	const seenRequests: any[] = [];
+	runtime.onAccessRequest = async (req) => {
+		seenRequests.push(req);
+		return { decision: "approved", capabilities: { status: true, read: true, send: false } };
+	};
+	const promptPeer = await connect();
+	const promptList = await promptPeer.request("session/list");
+	assert.equal(promptList.sessions[0]._meta[SHARED_MAIN].agentAccessPrompt, 1);
+	const decision = await promptPeer.request("session/request_access", {
+		sessionId,
+		requester: {
+			label: "Voice chat",
+			principalKind: "chat",
+			principalId: "voice-1",
+			workspaceId: "demo-workspace",
+			projectId: "demo-project",
+		},
+		requested: { status: true, read: true, send: true },
+		reason: "Status check",
+	});
+	assert.deepEqual(decision, { decision: "approved", capabilities: { status: true, read: true, send: false } });
+	assert.equal(seenRequests.length, 1);
+	assert.equal(seenRequests[0].requester.label, "Voice chat");
 });
