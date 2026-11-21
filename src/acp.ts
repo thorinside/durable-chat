@@ -13,13 +13,30 @@ import { basename, dirname, join, resolve } from "node:path";
 import { LiveDoc, defineDoc } from "@earendil-works/pi-durable";
 import type {
 	ConversationView,
+	Cursor,
+	EntryId,
 	EntryRecord,
 	Submission,
 } from "@earendil-works/pi-durable";
 import { resolveConfig } from "./config.ts";
 import type { AppRuntime } from "./harness.ts";
 import { PACKAGE_VERSION } from "./version.ts";
-import { AGENT_MESSAGE_KIND, AGENT_MESSAGING_VERSION, MAX_AGENT_REQUESTS, agentMessageInput, agentRequestScope, decodeMainCursor, encodeMainCursor, mainReadEntry, mainStatus, parseAgentAttachment, parseMainRead } from "./main-agent.ts";
+import {
+	AGENT_ACCESS_PROMPT_VERSION,
+	AGENT_MESSAGE_KIND,
+	AGENT_MESSAGING_VERSION,
+	AGENT_READ_LATEST_VERSION,
+	MAX_AGENT_REQUESTS,
+	agentMessageInput,
+	agentRequestScope,
+	decodeMainCursor,
+	encodeMainCursor,
+	mainReadEntry,
+	mainStatus,
+	parseAccessRequest,
+	parseAgentAttachment,
+	parseMainRead,
+} from "./main-agent.ts";
 
 export const SHARED_MAIN = "io.github.thorinside.durable-chat/shared-main";
 const MAX_FRAME = 4 * 1024 * 1024;
@@ -108,6 +125,7 @@ export type ListedMain = {
 	model?: string;
 	status?: ReturnType<typeof mainStatus>;
 	agentMessaging?: number;
+	agentAccessPrompt?: number;
 };
 
 /** Ask one endpoint which Main it serves. A dead or silent endpoint has none. */
@@ -152,6 +170,9 @@ function probeMain(endpoint: string): Promise<ListedMain[]> {
 													: {}),
 												status: session._meta?.[SHARED_MAIN]?.status,
 												agentMessaging: session._meta?.[SHARED_MAIN]?.agentMessaging,
+												...(session._meta?.[SHARED_MAIN]?.agentAccessPrompt === AGENT_ACCESS_PROMPT_VERSION
+													? { agentAccessPrompt: AGENT_ACCESS_PROMPT_VERSION }
+													: {}),
 											},
 										]
 									: [],
@@ -290,6 +311,7 @@ export async function serveMain(
 	const runtimeId = randomUUID();
 	// The public runtime ID identifies the owner for cancellation, not for signing cursors.
 	const cursorSecret = randomBytes(32);
+	const agentAnchors = new Map<string, { minEntryId: number; skipRequestId?: string }>();
 	const sockets = new Set<Socket>();
 	// Only called after acquiring the store's exclusive owner lock. A prior owner's stale socket is not another runtime.
 	try {
@@ -489,7 +511,14 @@ export async function serveMain(
 						agentCapabilities: {
 							loadSession: true,
 							sessionCapabilities: { list: {} },
-							_meta: { [SHARED_MAIN]: { version: 1, agentMessaging: AGENT_MESSAGING_VERSION } },
+							_meta: {
+								[SHARED_MAIN]: {
+									version: 1,
+									agentMessaging: AGENT_MESSAGING_VERSION,
+									agentReadLatest: AGENT_READ_LATEST_VERSION,
+									...(runtime.onAccessRequest ? { agentAccessPrompt: AGENT_ACCESS_PROMPT_VERSION } : {}),
+								},
+							},
 						},
 						authMethods: [],
 						_meta: { [SHARED_MAIN]: { runtimeId } },
@@ -512,7 +541,14 @@ export async function serveMain(
 											sessionId,
 											cwd: runtime.cwd,
 											title: "dchat Main",
-											_meta: { [SHARED_MAIN]: { model: runtime.modelLabel, status, agentMessaging: AGENT_MESSAGING_VERSION } },
+											_meta: {
+												[SHARED_MAIN]: {
+													model: runtime.modelLabel,
+													status,
+													agentMessaging: AGENT_MESSAGING_VERSION,
+													...(runtime.onAccessRequest ? { agentAccessPrompt: AGENT_ACCESS_PROMPT_VERSION } : {}),
+												},
+											},
 										},
 									],
 					});
@@ -525,6 +561,22 @@ export async function serveMain(
 				mainSessionCheck(params.sessionId, sessionId);
 				if (method === "session/status") {
 					reply(mainStatus(await runtime.harness.snapshot(LiveDoc, runtime.root.id, runtime.context), Date.now()));
+					return;
+				}
+				if (method === "session/request_access") {
+					if (!sharedMain) throw new Error("Initialize shared Main before requesting access");
+					const request = parseAccessRequest(params);
+					const handler = runtime.onAccessRequest;
+					if (!handler) throw new Error("Main has no interactive terminal window to prompt for access");
+					const controller = new AbortController();
+					const onClose = () => controller.abort();
+					socket.once("close", onClose);
+					try {
+						const decision = await handler(request, controller.signal);
+						reply(decision);
+					} finally {
+						socket.off("close", onClose);
+					}
 					return;
 				}
 				if (method === "session/attach") {
@@ -560,12 +612,55 @@ export async function serveMain(
 					});
 				if (method === "session/read") {
 					if (!agent?.read) throw new Error("Agent read capability required");
-					const { limit, cursor } = parseMainRead(params);
-					const scope = `${sessionId}:${JSON.stringify(agent.origin)}`;
-					const page = await runtime.root.entries({ order: "ascending" }, limit,
-						cursor === undefined ? undefined : decodeMainCursor(cursor, cursorSecret, scope), runtime.context);
-					reply({ entries: page.items.flatMap(mainReadEntry), untrusted: true,
-						...(page.next === undefined ? {} : { nextCursor: encodeMainCursor(page.next, cursorSecret, scope) }) });
+					const { limit, cursor, order } = parseMainRead(params);
+					const scope = `${sessionId}:${JSON.stringify(agentRequestScope(agent.origin))}`;
+					if (order === "latest") {
+						const collected: ReturnType<typeof mainReadEntry> = [];
+						let scanCursor: Cursor | undefined;
+						for (let pageIndex = 0; pageIndex < 20 && collected.length < limit; pageIndex++) {
+							const page = await runtime.root.entries(
+								{ order: "descending" },
+								Math.max(limit * 4, 40),
+								scanCursor,
+								runtime.context,
+							);
+							for (const entry of page.items) {
+								const projected = mainReadEntry(entry);
+								for (let index = projected.length - 1; index >= 0 && collected.length < limit; index--)
+									collected.push(projected[index]!);
+								if (collected.length >= limit) break;
+							}
+							if (page.next === undefined) break;
+							scanCursor = page.next;
+						}
+						reply({ entries: collected.reverse(), untrusted: true });
+						return;
+					}
+					const decoded = cursor === undefined ? undefined : decodeMainCursor(cursor, cursorSecret, scope);
+					if (decoded && decoded.__mainAnchor === true && typeof decoded.minEntryId === "number") {
+						const skipRequestId = typeof decoded.skipRequestId === "string" ? decoded.skipRequestId : undefined;
+						const page = await runtime.root.entries(
+							{ order: "ascending", minEntryId: decoded.minEntryId as EntryId },
+							limit,
+							undefined,
+							runtime.context,
+						);
+						const projected = page.items
+							.flatMap(mainReadEntry)
+							.filter((entry) => !skipRequestId || entry.requestId !== skipRequestId);
+						reply({
+							entries: projected,
+							untrusted: true,
+							...(page.next === undefined ? {} : { nextCursor: encodeMainCursor(page.next, cursorSecret, scope) }),
+						});
+						return;
+					}
+					const page = await runtime.root.entries({ order: "ascending" }, limit, decoded, runtime.context);
+					reply({
+						entries: page.items.flatMap(mainReadEntry),
+						untrusted: true,
+						...(page.next === undefined ? {} : { nextCursor: encodeMainCursor(page.next, cursorSecret, scope) }),
+					});
 					return;
 				}
 				if (method === "session/cancel") {
@@ -651,8 +746,30 @@ export async function serveMain(
 					}
 				}, runtime.context);
 				if (agent) {
+					let anchor = agentAnchors.get(receiptKey);
+					if (!anchor) {
+						const tail = await runtime.root.entries({ order: "descending" }, 1, undefined, runtime.context);
+						const latest = tail.items[0];
+						const latestIsThisMessage =
+							latest?.kind === AGENT_MESSAGE_KIND &&
+							(latest.data as { requestId?: string } | undefined)?.requestId === key;
+						anchor = latestIsThisMessage
+							? { minEntryId: Number(latest.id) + 1 }
+							: { minEntryId: latest ? Number(latest.id) + 1 : 1, skipRequestId: key };
+						agentAnchors.set(receiptKey, anchor);
+					}
+					const cursorScope = `${sessionId}:${JSON.stringify(scope!)}`;
+					const nextCursor = encodeMainCursor(
+						{
+							__mainAnchor: true,
+							minEntryId: anchor.minEntryId,
+							...(anchor.skipRequestId === undefined ? {} : { skipRequestId: anchor.skipRequestId }),
+						},
+						cursorSecret,
+						cursorScope,
+					);
 					// Admission is durable, not proof of an answer; never push replies/history to this lease.
-					reply({ _meta: { [SHARED_MAIN]: { requestId: key, submissionId, status: "accepted" } } });
+					reply({ _meta: { [SHARED_MAIN]: { requestId: key, submissionId, status: "accepted", nextCursor } } });
 					return;
 				}
 				update({

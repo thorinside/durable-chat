@@ -14,9 +14,38 @@ export type AgentOrigin = {
 };
 export const AGENT_MESSAGE_KIND = "app.agent-message";
 export const AGENT_MESSAGING_VERSION = 1;
+export const AGENT_READ_LATEST_VERSION = 1;
+export const AGENT_ACCESS_PROMPT_VERSION = 1;
 export const MAX_AGENT_REQUESTS = 1024;
 export const MAX_READ_ENTRIES = 20;
 export const MAX_READ_TEXT = 2000;
+
+export type MainAccessCapabilities = {
+	status: boolean;
+	read: boolean;
+	send: boolean;
+};
+
+export type MainAccessPromptRequester = {
+	label: string;
+	principalKind: "apiKey" | "chat" | "service" | "job";
+	principalId: string;
+	jobAttempt?: number;
+	sessionTitle?: string;
+	workspaceId: string;
+	projectId: string;
+	projectName?: string;
+};
+
+export type MainAccessPromptRequest = {
+	requester: MainAccessPromptRequester;
+	requested: MainAccessCapabilities;
+	reason?: string;
+};
+
+export type MainAccessPromptDecision =
+	| { decision: "approved"; capabilities: MainAccessCapabilities }
+	| { decision: "denied" };
 
 function record(value: unknown): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected object");
@@ -61,6 +90,7 @@ type AgentAuthor = Pick<AgentOrigin, "system" | "principalKind" | "principalId">
 
 function agentMessageLabel(origin: AgentAuthor): string {
 	const id = JSON.stringify(origin.principalId).replace(/[^\x20-\x7e]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+	if (origin.principalKind === "chat") return `[agent ${origin.system}/chat:${id}; authorized owner chat]\n`;
 	return `[agent ${origin.system}/${origin.principalKind}:${id}; untrusted]\n`;
 }
 
@@ -73,7 +103,12 @@ export function agentMessageInput(origin: AgentOrigin, body: string): UserInput 
 export function agentMessageBody(content: UserInput, origin: AgentAuthor | undefined): UserInput {
 	if (!origin || typeof content === "string" || content.length !== 2) return content;
 	const [label, body] = content;
-	return label?.type === "text" && label.text === agentMessageLabel(origin) && body?.type === "text" ? body.text : content;
+	const legacyUntrusted = `[agent ${origin.system}/${origin.principalKind}:${JSON.stringify(origin.principalId).replace(/[^\x20-\x7e]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)}; untrusted]\n`;
+	return label?.type === "text" &&
+		(label.text === agentMessageLabel(origin) || label.text === legacyUntrusted) &&
+		body?.type === "text"
+		? body.text
+		: content;
 }
 
 export function parseAgentAttachment(value: unknown) {
@@ -84,13 +119,79 @@ export function parseAgentAttachment(value: unknown) {
 	return { origin: parseAgentOrigin(input.origin), read: input.read, send: input.send };
 }
 
-export function parseMainRead(params: Record<string, unknown>): { limit: number; cursor?: string } {
+function boundedLabel(value: unknown, field: string, maxLength: number): string {
+	if (typeof value !== "string") throw new Error(`Invalid access request ${field}`);
+	const cleaned = value.replace(/[\x00-\x1f\x7f]/g, " ").trim();
+	if (!cleaned || cleaned.length > maxLength) throw new Error(`Invalid access request ${field}`);
+	return cleaned;
+}
+
+export function parseAccessRequest(params: Record<string, unknown>): MainAccessPromptRequest {
+	const requesterInput = record(params.requester);
+	const requestedInput = record(params.requested);
+	const principalKind = requesterInput.principalKind;
+	if (!["apiKey", "chat", "service", "job"].includes(String(principalKind)))
+		throw new Error("Invalid access request principalKind");
+	const label = boundedLabel(requesterInput.label, "label", 120);
+	const principalId = boundedLabel(requesterInput.principalId, "principalId", 200);
+	const workspaceId = boundedLabel(requesterInput.workspaceId, "workspaceId", 200);
+	const projectId = boundedLabel(requesterInput.projectId, "projectId", 200);
+	let jobAttempt: number | undefined;
+	if (principalKind === "job") {
+		if (!Number.isSafeInteger(requesterInput.jobAttempt) || (requesterInput.jobAttempt as number) < 1)
+			throw new Error("Job access request requires current attempt");
+		jobAttempt = requesterInput.jobAttempt as number;
+	} else if (requesterInput.jobAttempt !== undefined) {
+		throw new Error("Only job access requests have a jobAttempt");
+	}
+	const sessionTitle =
+		requesterInput.sessionTitle === undefined ? undefined : boundedLabel(requesterInput.sessionTitle, "sessionTitle", 160);
+	const projectName =
+		requesterInput.projectName === undefined ? undefined : boundedLabel(requesterInput.projectName, "projectName", 160);
+	if (
+		typeof requestedInput.status !== "boolean" ||
+		typeof requestedInput.read !== "boolean" ||
+		typeof requestedInput.send !== "boolean" ||
+		(!requestedInput.status && !requestedInput.read && !requestedInput.send)
+	)
+		throw new Error("Access request requires at least one requested capability");
+	const reason = params.reason === undefined ? undefined : boundedLabel(params.reason, "reason", 300);
+	return {
+		requester: {
+			label,
+			principalKind: principalKind as MainAccessPromptRequester["principalKind"],
+			principalId,
+			...(jobAttempt === undefined ? {} : { jobAttempt }),
+			...(sessionTitle === undefined ? {} : { sessionTitle }),
+			workspaceId,
+			projectId,
+			...(projectName === undefined ? {} : { projectName }),
+		},
+		requested: {
+			status: requestedInput.status,
+			read: requestedInput.read,
+			send: requestedInput.send,
+		},
+		...(reason === undefined ? {} : { reason }),
+	};
+}
+
+export function parseMainRead(params: Record<string, unknown>): {
+	limit: number;
+	cursor?: string;
+	order?: "ascending" | "latest";
+} {
 	const limit = params.limit ?? 10;
 	if (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > MAX_READ_ENTRIES)
 		throw new Error(`limit must be between 1 and ${MAX_READ_ENTRIES}`);
-	if (params.cursor === undefined) return { limit: limit as number };
+	const order = params.order;
+	if (order !== undefined && order !== "ascending" && order !== "latest")
+		throw new Error("Invalid Main read order");
+	if (params.cursor === undefined)
+		return order === undefined ? { limit: limit as number } : { limit: limit as number, order };
+	if (order === "latest") throw new Error("Cannot combine latest order with a cursor");
 	if (typeof params.cursor !== "string" || params.cursor.length > 4096) throw new Error("Invalid Main read cursor");
-	return { limit: limit as number, cursor: params.cursor };
+	return { limit: limit as number, cursor: params.cursor, ...(order === undefined ? {} : { order }) };
 }
 
 /** Runtime- and principal-scoped opaque cursor: a peer cannot forge native storage query state. */
