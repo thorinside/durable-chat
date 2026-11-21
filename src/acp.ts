@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
 	chmodSync,
 	lstatSync,
@@ -19,6 +19,7 @@ import type {
 import { resolveConfig } from "./config.ts";
 import type { AppRuntime } from "./harness.ts";
 import { PACKAGE_VERSION } from "./version.ts";
+import { AGENT_MESSAGE_KIND, AGENT_MESSAGING_VERSION, MAX_AGENT_REQUESTS, agentMessageInput, agentRequestScope, decodeMainCursor, encodeMainCursor, mainReadEntry, mainStatus, parseAgentAttachment, parseMainRead } from "./main-agent.ts";
 
 export const SHARED_MAIN = "io.github.thorinside.durable-chat/shared-main";
 const MAX_FRAME = 4 * 1024 * 1024;
@@ -43,6 +44,11 @@ const Requests = defineDoc<{
 	fork: "initial",
 	initial: () => ({ requests: {} }),
 	checkpointWhen: () => false,
+});
+/** Agent receipts are never evicted: at capacity admission fails rather than risking duplicate paid work. */
+const AgentRequests = defineDoc<{ requests: Record<string, { hash: string; submission: number }> }>({
+	kind: "durable-chat.agent-requests", version: 1, scope: "conversation", history: "latest", fork: "initial",
+	initial: () => ({ requests: {} }), checkpointWhen: () => false,
 });
 const hash = (value: string) =>
 	createHash("sha256").update(value).digest("hex");
@@ -100,6 +106,8 @@ export type ListedMain = {
 	cwd: string;
 	title: string;
 	model?: string;
+	status?: ReturnType<typeof mainStatus>;
+	agentMessaging?: number;
 };
 
 /** Ask one endpoint which Main it serves. A dead or silent endpoint has none. */
@@ -142,6 +150,8 @@ function probeMain(endpoint: string): Promise<ListedMain[]> {
 												...(typeof session._meta?.[SHARED_MAIN]?.model === "string"
 													? { model: session._meta[SHARED_MAIN].model }
 													: {}),
+												status: session._meta?.[SHARED_MAIN]?.status,
+												agentMessaging: session._meta?.[SHARED_MAIN]?.agentMessaging,
 											},
 										]
 									: [],
@@ -228,6 +238,7 @@ export function entryUpdates(
 							: "agent_message_chunk",
 					messageId: id,
 					content: { type: "text", text: value },
+					...(entry.kind === AGENT_MESSAGE_KIND ? { _meta: { [SHARED_MAIN]: { agentOrigin: entry.data } } } : {}),
 				});
 			if (message.role === "assistant")
 				for (const [blockIndex, block] of message.content.entries())
@@ -277,6 +288,8 @@ export async function serveMain(
 	const db = statSync(runtime.storePath);
 	const sessionId = `main:${hash(`${realpathSync(runtime.storePath)}:${db.ino}:${db.birthtimeMs}`).slice(0, 32)}`;
 	const runtimeId = randomUUID();
+	// The public runtime ID identifies the owner for cancellation, not for signing cursors.
+	const cursorSecret = randomBytes(32);
 	const sockets = new Set<Socket>();
 	// Only called after acquiring the store's exclusive owner lock. A prior owner's stale socket is not another runtime.
 	try {
@@ -309,6 +322,7 @@ export async function serveMain(
 		sockets.add(socket);
 		let initialized = false;
 		let sharedMain = false;
+		let agent: ReturnType<typeof parseAgentAttachment> | undefined;
 		let loaded = false;
 		let detach: (() => void) | undefined;
 		let loading = false;
@@ -475,7 +489,7 @@ export async function serveMain(
 						agentCapabilities: {
 							loadSession: true,
 							sessionCapabilities: { list: {} },
-							_meta: { [SHARED_MAIN]: { version: 1 } },
+							_meta: { [SHARED_MAIN]: { version: 1, agentMessaging: AGENT_MESSAGING_VERSION } },
 						},
 						authMethods: [],
 						_meta: { [SHARED_MAIN]: { runtimeId } },
@@ -487,6 +501,8 @@ export async function serveMain(
 						rpcCode: -32600,
 					});
 				if (method === "session/list") {
+					// Snapshot reads only one live-control document; it does not mount a conversation or read history.
+					const status = mainStatus(await runtime.harness.snapshot(LiveDoc, runtime.root.id, runtime.context), Date.now());
 					reply({
 						sessions:
 							params.cwd && params.cwd !== runtime.cwd
@@ -496,7 +512,7 @@ export async function serveMain(
 											sessionId,
 											cwd: runtime.cwd,
 											title: "dchat Main",
-											_meta: { [SHARED_MAIN]: { model: runtime.modelLabel } },
+											_meta: { [SHARED_MAIN]: { model: runtime.modelLabel, status, agentMessaging: AGENT_MESSAGING_VERSION } },
 										},
 									],
 					});
@@ -507,7 +523,20 @@ export async function serveMain(
 						"Creation disabled: attach existing Main using session/list and session/load",
 					);
 				mainSessionCheck(params.sessionId, sessionId);
+				if (method === "session/status") {
+					reply(mainStatus(await runtime.harness.snapshot(LiveDoc, runtime.root.id, runtime.context), Date.now()));
+					return;
+				}
+				if (method === "session/attach") {
+					if (!sharedMain || loaded) throw new Error("Initialize shared Main and attach once per connection");
+					agent = parseAgentAttachment(params._meta?.[SHARED_MAIN]?.agent);
+					// A separate agent lease: no replay, observer, terminal ownership or cancel authority.
+					loaded = true;
+					reply({ agentMessaging: AGENT_MESSAGING_VERSION });
+					return;
+				}
 				if (method === "session/load") {
+					if (agent) throw new Error("Agent attachments cannot load or subscribe; use session/read");
 					if (
 						params.cwd !== runtime.cwd ||
 						!Array.isArray(params.mcpServers) ||
@@ -529,7 +558,18 @@ export async function serveMain(
 					throw Object.assign(new Error("Load Main first"), {
 						rpcCode: -32002,
 					});
+				if (method === "session/read") {
+					if (!agent?.read) throw new Error("Agent read capability required");
+					const { limit, cursor } = parseMainRead(params);
+					const scope = `${sessionId}:${JSON.stringify(agent.origin)}`;
+					const page = await runtime.root.entries({ order: "ascending" }, limit,
+						cursor === undefined ? undefined : decodeMainCursor(cursor, cursorSecret, scope), runtime.context);
+					reply({ entries: page.items.flatMap(mainReadEntry), untrusted: true,
+						...(page.next === undefined ? {} : { nextCursor: encodeMainCursor(page.next, cursorSecret, scope) }) });
+					return;
+				}
 				if (method === "session/cancel") {
+					if (agent) throw new Error("Agent attachments have no cancellation authority");
 					const expected = params._meta?.[SHARED_MAIN];
 					if (expected?.runtimeId && expected.runtimeId !== runtimeId) return;
 					// Native scope, including queued input on either frontend; never background job tasks.
@@ -541,10 +581,13 @@ export async function serveMain(
 					throw Object.assign(new Error("Unsupported ACP method"), {
 						rpcCode: -32601,
 					});
+				if (agent && !agent.send) throw new Error("Agent send capability required");
 				if (!Array.isArray(params.prompt) || params.prompt.length === 0)
 					throw Object.assign(new Error("Nonempty prompt required"), {
 						rpcCode: -32602,
 					});
+				if (agent && (params.prompt.length !== 1 || params.prompt[0]?.type !== "text" || typeof params.prompt[0]?.text !== "string" || !params.prompt[0].text.trim()))
+					throw new Error("Agent send accepts exactly one nonempty text block");
 				const content = params.prompt
 					.map((block: RecordValue) => {
 						if (block.type === "text" && typeof block.text === "string")
@@ -560,6 +603,7 @@ export async function serveMain(
 				const suppliedKey = params._meta?.[SHARED_MAIN]?.requestId;
 				// JSON-RPC IDs correlate replies, not durable retries. Without an extension key,
 				// each prompt admission is new input, even when the caller reuses its RPC ID.
+				if (agent && suppliedKey === undefined) throw new Error("Agent send requires a stable requestId");
 				const key = suppliedKey === undefined ? randomUUID() : suppliedKey;
 				if (typeof key !== "string" || key.length > 128 || !key)
 					throw Object.assign(
@@ -571,11 +615,17 @@ export async function serveMain(
 						new Error("Main input exceeds 100000 characters"),
 						{ rpcCode: -32602 },
 					);
-				const fingerprint = hash(content);
+				const origin = agent?.origin;
+				const scope = origin ? agentRequestScope(origin) : undefined;
+				// Hash caller-supplied text, not its model-facing label, so existing receipts still match.
+				const fingerprint = scope ? hash(JSON.stringify({ content, scope })) : hash(content);
+				const receiptKey = scope ? `${hash(JSON.stringify(scope))}:${key}` : key;
 				let submissionId = 0;
 				await runtime.root.commit(async (tx) => {
-					const requests = await tx.doc(Requests, runtime.root.id);
-					const existing = requests.requests[key];
+					const requests = await tx.doc(origin ? AgentRequests : Requests, runtime.root.id);
+					const existing = requests.requests[receiptKey];
+					if (origin && !existing && Object.keys(requests.requests).length >= MAX_AGENT_REQUESTS)
+						throw new Error("Agent receipt capacity reached; nothing was sent. Owner intervention required; do not retry under a new ID.");
 					if (existing && existing.hash !== fingerprint)
 						throw new Error("requestId already identifies different input");
 					submissionId =
@@ -583,22 +633,28 @@ export async function serveMain(
 						Number(
 							await runtime.root.submit(tx, {
 								type: "input",
-								content,
+								content: origin ? agentMessageInput(origin, content) : content,
 								whenBusy: "followUp",
-								requestId: `acp:${key}`,
+								requestId: origin ? `agent:${receiptKey}` : `acp:${key}`,
+								...(origin ? { entry: { kind: AGENT_MESSAGE_KIND, data: { origin, requestId: key } } } : {}),
 							}),
 						);
 					if (!existing) {
-						requests.requests[key] = {
+						requests.requests[receiptKey] = {
 							hash: fingerprint,
 							submission: submissionId,
 						};
-						// Deduplication only has to cover retries of recent input; this record is rewritten on every prompt.
+						// Human ACP retains its existing recent-input window. Agent receipts are never evicted.
 						const keys = Object.keys(requests.requests);
-						for (const old of keys.slice(0, Math.max(0, keys.length - MAX_REQUESTS)))
+						for (const old of origin ? [] : keys.slice(0, Math.max(0, keys.length - MAX_REQUESTS)))
 							delete requests.requests[old];
 					}
 				}, runtime.context);
+				if (agent) {
+					// Admission is durable, not proof of an answer; never push replies/history to this lease.
+					reply({ _meta: { [SHARED_MAIN]: { requestId: key, submissionId, status: "accepted" } } });
+					return;
+				}
 				update({
 					sessionUpdate: "session_info_update",
 					_meta: {

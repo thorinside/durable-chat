@@ -194,7 +194,7 @@ dchat acp                 # standard ACP JSON-RPC over stdio; normally started b
 # Explicit configuration is also supported:
 dchat acp --config /absolute/path/to/config.yaml
 # Discover every Main this user is running, then attach to one by its endpoint alone:
-dchat acp list            # {"mains":[{"endpoint","sessionId","cwd","title","model"}]}
+dchat acp list            # JSON endpoint/session details, status and agent messaging version
 dchat acp --endpoint /tmp/dchat-<uid>/<id>.sock
 ```
 
@@ -228,14 +228,33 @@ at initialize. These clients must remove obsolete live IDs using `activeMessageI
 metadata; the committed entry is authoritative. Other capability versions do not opt in.
 Both modes honor an optional prompt `_meta` under that same key containing `requestId`
 (a nonempty string, at most 128 characters), retaining the existing bounded recent-input
-retry deduplication. Without it, each prompt gets a fresh admission UUID: retries can
-create new input, even with the same JSON-RPC correlation ID. No standard retry guarantee
-is implied. Extension details are defined by `src/acp.ts`.
+retry deduplication for human prompts. Without it, each human prompt gets a fresh
+admission UUID: retries can create new input, even with the same JSON-RPC
+correlation ID. No standard retry guarantee is implied.
 
-This follows the [ACP stable v1 prompt/content contract](https://github.com/agentclientprotocol/agent-client-protocol/blob/dbff792240171b199b5ad24d01406720ac9e4bd3/schema/v1/schema.json)
-(schema source package 1.19.0; no ACP SDK dependency). No custom content RPC methods or
-ACP network listener are introduced. Existing tool/terminal permissions remain unchanged;
-the frontend never approves on the user's behalf.
+The same-user agent profile is advertised as `agentMessaging` at initialization
+and in Main discovery. `session/status` returns run metadata without reading
+history. An opted-in peer uses `session/attach` with origin and explicit read/send
+capabilities instead of loading Main. This lease cannot load, subscribe, cancel,
+or address jobs; disconnecting only detaches. `session/read` pulls bounded,
+untrusted committed Main text. Treat its continuation cursor as opaque; it is
+scoped to the current owner runtime and origin. Start a new read if it expires.
+
+Agent `session/prompt` requires a stable `requestId` and one nonempty text block.
+Its durable `accepted` receipt is not an answer or an end-of-turn response.
+Retrying the same request under the same caller/target scope reuses the receipt
+even if the grant changes; a different payload under that ID is rejected. New
+sends fail closed at receipt capacity (`MAX_AGENT_REQUESTS`). The profile does
+not start an absent owner, stop Main, or automatically resend. Main sees new
+agent inputs labeled as untrusted reports, not as instructions from the user.
+The local socket trusts the Unix owner; origin and capabilities must be supplied
+by a trusted peer, not inferred by dchat from text. See `src/acp.ts` and
+`src/main-agent.ts` for the extension and its limits.
+
+The human profile follows the [ACP stable v1 prompt/content contract](https://github.com/agentclientprotocol/agent-client-protocol/blob/dbff792240171b199b5ad24d01406720ac9e4bd3/schema/v1/schema.json)
+(schema source package 1.19.0; no ACP SDK dependency). The agent methods are local
+extensions, not standard ACP or a network listener. Existing tool/terminal
+permissions remain unchanged; the frontend never approves on the user's behalf.
 
 ## Future wake-ups
 
